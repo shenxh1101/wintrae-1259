@@ -80,6 +80,15 @@ export interface ScoreDistribution {
   failRate: number;
 }
 
+export interface StudentOverallScore {
+  studentId: string;
+  totalEarned: number;
+  totalMax: number;
+  percentage: number;
+  passed: boolean;
+  answeredQuestionCount: number;
+}
+
 export interface ClassSummaryMetrics {
   classId: string;
   taskId: string;
@@ -97,11 +106,22 @@ export interface ClassSummaryMetrics {
   timeSpentAverage?: number;
   overallAssessment: OverallAssessment;
   scoreDistribution: ScoreDistribution;
+  studentScores: StudentOverallScore[];
   questionPerformance: QuestionPerformance[];
   tagPerformance: TagPerformance[];
   errorDistribution: ErrorDistribution[];
   commonErrors: CommonError[];
   generatedAt: Date;
+}
+
+export interface StudentFilteredDetail {
+  studentId: string;
+  totalEarned: number;
+  totalMax: number;
+  percentage: number;
+  passed: boolean;
+  weakQuestions: { questionId: string; earnedScore: number; totalScore: number; passRate: number }[];
+  mainErrors: { category: string; description: string; count: number }[];
 }
 
 export interface FilteredSummaryView {
@@ -115,6 +135,8 @@ export interface FilteredSummaryView {
   weakPoints: WeakPoint[];
   questionPerformance: QuestionPerformance[];
   commonErrors: CommonError[];
+  studentDetails: StudentFilteredDetail[];
+  suggestedTeachingOrder: { questionId: string; priority: 'high' | 'medium' | 'low'; reason: string }[];
 }
 
 export interface WeakPoint {
@@ -168,7 +190,29 @@ export interface PerQuestionFeedback {
   excellentRate: number;
 }
 
-export type ExportFormat = 'class_notice' | 'teaching_group' | 'simple';
+export type ExportFormat = 'class_notice' | 'teaching_group' | 'simple' | 'lesson_review';
+
+export type BatchExportView = 'by_question' | 'by_student';
+
+export interface BatchExportOptions {
+  view: BatchExportView;
+  questionId?: string;
+  studentId?: string;
+  includeStudentFeedback?: boolean;
+  includeTeacherComment?: boolean;
+}
+
+export interface LessonReviewData {
+  coreMetrics: {
+    submissionRate: number;
+    averageScore: number;
+    passRate: number;
+    excellentRate: number;
+  };
+  commonProblems: { title: string; description: string; affectedRate: number; suggestion: string }[];
+  suggestedTeachingOrder: { order: number; questionId: string; topic: string; reason: string }[];
+  teachingGroupConclusion: string;
+}
 
 export interface ExportOptions {
   format?: ExportFormat;
@@ -177,6 +221,7 @@ export interface ExportOptions {
   includeActionItems?: boolean;
   customHeader?: string;
   customFooter?: string;
+  lessonReview?: LessonReviewData;
 }
 
 export interface QuestionPerformance {

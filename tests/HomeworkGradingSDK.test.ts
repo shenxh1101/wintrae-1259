@@ -1009,6 +1009,167 @@ describe('HomeworkGradingSDK', () => {
       expect(result.perStudent[0].questionResults.length).toBe(1);
       expect(result.perStudent[0].questionResults[0].questionId).toBe('q1');
     });
+
+    it('should export batch feedback by question view', () => {
+      const result = sdk.generateBatchFeedback({
+        taskId: 'batch-task',
+        studentIds: ['batch-stu1', 'batch-stu2', 'batch-stu3'],
+        questionIds: ['q1'],
+      });
+      const exported = sdk.exportBatchFeedback(result, {
+        view: 'by_question',
+        questionId: 'q1',
+      });
+
+      expect(exported).toContain('题目');
+      expect(exported).toContain('共性反馈');
+      expect(exported).toContain('均分');
+      expect(exported).toContain('及格率');
+    });
+
+    it('should export batch feedback by student view', () => {
+      const result = sdk.generateBatchFeedback({
+        taskId: 'batch-task',
+        studentIds: ['batch-stu1', 'batch-stu2'],
+      });
+      const exported = sdk.exportBatchFeedback(result, {
+        view: 'by_student',
+        studentId: 'batch-stu1',
+      });
+
+      expect(exported).toContain('学生');
+      expect(exported).toContain('完整反馈');
+      expect(exported).toContain('总分');
+      expect(exported).toContain('题目');
+    });
+
+    it('should export batch feedback all questions', () => {
+      const result = sdk.generateBatchFeedback({
+        taskId: 'batch-task',
+        studentIds: ['batch-stu1'],
+      });
+      const exported = sdk.exportBatchFeedback(result, { view: 'by_question' });
+
+      expect(exported.length).toBeGreaterThan(0);
+      expect(exported).toContain('q1');
+      expect(exported).toContain('q3');
+    });
+  });
+
+  describe('Advanced Summary & Lesson Review', () => {
+    beforeEach(() => {
+      sdk.createTask({
+        taskId: 'review-task',
+        title: '教案复盘测试作业',
+        classId: 'class-review',
+        questions: [singleChoiceRule, calculationRule],
+        retryPolicy,
+      });
+
+      const answers: Record<string, Record<string, unknown>> = {
+        'r-stu1': { q1: 'B', q3: '设x为未知数，2x+10=94，x=42。验证正确。' },
+        'r-stu2': { q1: 'B', q3: '2x=94，x=47。' },
+        'r-stu3': { q1: 'A', q3: 'x=40' },
+        'r-stu4': { q1: 'B', q3: '根据题意列方程解得x=42' },
+      };
+
+      for (const [sid, ans] of Object.entries(answers)) {
+        sdk.submitAnswer('review-task', {
+          questionId: 'q1',
+          answer: ans.q1 as never,
+          studentId: sid,
+          submissionTime: new Date(),
+          attemptNumber: 1,
+        });
+        sdk.submitAnswer('review-task', {
+          questionId: 'q3',
+          answer: ans.q3 as never,
+          studentId: sid,
+          submissionTime: new Date(),
+          attemptNumber: 1,
+        });
+        sdk.gradeSubmission('review-task', sid, 'q1');
+        sdk.gradeSubmission('review-task', sid, 'q3');
+      }
+    });
+
+    it('should calculate metrics by student (one student counts once)', () => {
+      const summary = sdk.generateClassSummary('review-task', 'class-review', 6);
+
+      expect(summary.studentScores.length).toBe(4);
+      expect(summary.submittedCount).toBe(4);
+      expect(summary.submissionRate).toBeCloseTo(4 / 6, 2);
+      expect(summary.averageScore).toBeGreaterThan(0);
+      expect(summary.passRate).toBeGreaterThanOrEqual(0);
+      expect(summary.passRate).toBeLessThanOrEqual(1);
+    });
+
+    it('should include score distribution by student', () => {
+      const summary = sdk.generateClassSummary('review-task', 'class-review', 6);
+      const sd = summary.scoreDistribution;
+
+      expect(sd.excellentCount + sd.goodCount + sd.passCount + sd.failCount).toBe(4);
+      expect(sd.excellentRate + sd.goodRate + sd.passRate + sd.failRate).toBeCloseTo(1, 1);
+    });
+
+    it('should show student details in filtered view by tag', () => {
+      const view = sdk.generateFilteredSummaryByTag('review-task', 'class-review', 6, 'foundation');
+
+      expect(view.studentDetails.length).toBeGreaterThan(0);
+      const firstStudent = view.studentDetails[0];
+      expect(firstStudent.studentId).toBeDefined();
+      expect(firstStudent.percentage).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should include weak questions and main errors in student details', () => {
+      const view = sdk.generateFilteredSummaryByTag('review-task', 'class-review', 6, 'foundation');
+
+      for (const sd of view.studentDetails) {
+        if (sd.weakQuestions.length > 0) {
+          expect(sd.weakQuestions[0].questionId).toBeDefined();
+          expect(sd.weakQuestions[0].earnedScore).toBeGreaterThanOrEqual(0);
+        }
+      }
+    });
+
+    it('should suggest teaching order in filtered view', () => {
+      const view = sdk.generateFilteredSummaryByTag('review-task', 'class-review', 6, 'application');
+
+      expect(view.suggestedTeachingOrder.length).toBeGreaterThan(0);
+      for (const s of view.suggestedTeachingOrder) {
+        expect(s.questionId).toBeDefined();
+        expect(['high', 'medium', 'low']).toContain(s.priority);
+        expect(s.reason.length).toBeGreaterThan(0);
+      }
+    });
+
+    it('should export lesson review format', () => {
+      const summary = sdk.generateClassSummary('review-task', 'class-review', 6);
+      const exported = sdk.exportClassSummary(summary, { format: 'lesson_review' });
+
+      expect(exported).toContain('教案复盘');
+      expect(exported).toContain('核心指标');
+      expect(exported).toContain('共性问题');
+      expect(exported).toContain('讲解顺序建议');
+      expect(exported).toContain('教研组简报');
+    });
+
+    it('should include teaching group conclusion in lesson review', () => {
+      const summary = sdk.generateClassSummary('review-task', 'class-review', 6);
+      const exported = sdk.exportClassSummary(summary, { format: 'lesson_review' });
+
+      expect(exported).toContain(summary.classId);
+      expect(exported).toMatch(/及格率|及格/);
+      expect(exported).toMatch(/优秀率|优秀/);
+    });
+
+    it('should format filtered summary with student details', () => {
+      const view = sdk.generateFilteredSummaryByTag('review-task', 'class-review', 6, 'application');
+      const formatted = sdk.formatFilteredSummary(view);
+
+      expect(formatted).toContain('建议讲解顺序');
+      expect(formatted).toContain('专项分析');
+    });
   });
 
   describe('Integration Test - Full Workflow', () => {

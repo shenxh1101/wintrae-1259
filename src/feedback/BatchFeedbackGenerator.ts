@@ -8,6 +8,8 @@ import {
   StudentFeedback,
   TeacherCommentDraft,
   GradingTask,
+  BatchExportOptions,
+  BatchExportView,
 } from '../types';
 import { StudentFeedbackGenerator } from './StudentFeedbackGenerator';
 import { TeacherCommentGenerator } from './TeacherCommentGenerator';
@@ -180,6 +182,167 @@ export class BatchFeedbackGenerator {
     for (const ps of result.perStudent.sort((a, b) => b.overallPercentage - a.overallPercentage)) {
       const flag = ps.overallPercentage >= 90 ? '⭐' : ps.passed ? '✅' : '❌';
       lines.push(`  ${flag} ${ps.studentId}: ${ps.totalScore}/${ps.maxScore}分 (${ps.overallPercentage.toFixed(1)}%)`);
+    }
+
+    return lines.join('\n');
+  }
+
+  exportByView(result: BatchFeedbackResult, options: BatchExportOptions): string {
+    if (options.view === 'by_question') {
+      if (!options.questionId) {
+        const lines: string[] = [];
+        for (const pq of result.perQuestion) {
+          lines.push(this.exportByQuestion(result, pq.questionId, options));
+          lines.push('');
+        }
+        return lines.join('\n');
+      }
+      return this.exportByQuestion(result, options.questionId, options);
+    } else {
+      if (!options.studentId) {
+        const lines: string[] = [];
+        for (const ps of result.perStudent.sort((a, b) => b.overallPercentage - a.overallPercentage)) {
+          lines.push(this.exportByStudent(result, ps.studentId, options));
+          lines.push('');
+        }
+        return lines.join('\n');
+      }
+      return this.exportByStudent(result, options.studentId, options);
+    }
+  }
+
+  private exportByQuestion(
+    result: BatchFeedbackResult,
+    questionId: string,
+    options: BatchExportOptions,
+  ): string {
+    const lines: string[] = [];
+    const qInfo = result.perQuestion.find(q => q.questionId === questionId);
+    if (!qInfo) return '';
+
+    const qFlag = qInfo.passRate >= 0.8 ? '✅' : qInfo.passRate >= 0.6 ? '⚠️' : '❌';
+    lines.push(`========================================`);
+    lines.push(`  题目 ${questionId} 共性反馈`);
+    lines.push(`========================================`);
+    lines.push(`${qFlag} 均分: ${qInfo.averageScore.toFixed(1)} | 及格率: ${(qInfo.passRate * 100).toFixed(1)}% | 优秀率: ${(qInfo.excellentRate * 100).toFixed(1)}% | 答题: ${qInfo.answeredCount}/${qInfo.totalStudents}人`);
+    lines.push('');
+
+    const studentRows = this.getStudentFeedbackByQuestion(result, questionId);
+    const allStrengths = new Map<string, number>();
+    const allImprovements = new Map<string, number>();
+    const allErrors = new Map<string, number>();
+
+    for (const row of studentRows) {
+      for (const s of row.feedback.strengths) {
+        allStrengths.set(s, (allStrengths.get(s) || 0) + 1);
+      }
+      for (const im of row.feedback.improvements) {
+        allImprovements.set(im, (allImprovements.get(im) || 0) + 1);
+      }
+      for (const ef of row.feedback.errorFeedback) {
+        const key = `${ef.categoryName}: ${ef.description}`;
+        allErrors.set(key, (allErrors.get(key) || 0) + 1);
+      }
+    }
+
+    if (allStrengths.size > 0) {
+      lines.push(`【全班共同亮点】`);
+      const sortedStrengths = Array.from(allStrengths.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      for (const [text, count] of sortedStrengths) {
+        lines.push(`  ✅ ${text} (${count}人)`);
+      }
+      lines.push('');
+    }
+
+    if (allImprovements.size > 0) {
+      lines.push(`【全班需改进】`);
+      const sortedImps = Array.from(allImprovements.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      for (const [text, count] of sortedImps) {
+        lines.push(`  ⚠️ ${text} (${count}人)`);
+      }
+      lines.push('');
+    }
+
+    if (allErrors.size > 0) {
+      lines.push(`【全班主要错误】`);
+      const sortedErrors = Array.from(allErrors.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      for (const [text, count] of sortedErrors) {
+        lines.push(`  ❌ ${text} (${count}人)`);
+      }
+      lines.push('');
+    }
+
+    if (options.includeTeacherComment !== false) {
+      lines.push(`【教师参考评语】`);
+      const topStudent = studentRows.find(s => s.result.percentage >= 90);
+      if (topStudent) {
+        lines.push(`  优秀示例评语: ${topStudent.comment.overallComment}`);
+      }
+      const midStudent = studentRows.find(s => s.result.passed && s.result.percentage < 90);
+      if (midStudent) {
+        lines.push(`  良好示例评语: ${midStudent.comment.overallComment}`);
+      }
+      const lowStudent = studentRows.find(s => !s.result.passed);
+      if (lowStudent) {
+        lines.push(`  待提升示例评语: ${lowStudent.comment.overallComment}`);
+      }
+    }
+
+    lines.push('');
+    lines.push(`【学生逐人得分】`);
+    for (const row of studentRows.sort((a, b) => b.result.percentage - a.result.percentage)) {
+      const flag = row.result.percentage >= 90 ? '⭐' : row.result.passed ? '✅' : '❌';
+      lines.push(`  ${flag} ${row.studentId}: ${row.result.earnedScore}/${row.result.totalScore}分 (${row.result.percentage.toFixed(1)}%)`);
+      if (options.includeStudentFeedback !== false) {
+        lines.push(`     反馈: ${row.feedback.overallMessage}`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  private exportByStudent(
+    result: BatchFeedbackResult,
+    studentId: string,
+    options: BatchExportOptions,
+  ): string {
+    const lines: string[] = [];
+    const ps = result.perStudent.find(s => s.studentId === studentId);
+    if (!ps) return '';
+
+    const overallFlag = ps.overallPercentage >= 90 ? '⭐' : ps.passed ? '✅' : '❌';
+    lines.push(`========================================`);
+    lines.push(`  学生 ${ps.studentId} 完整反馈`);
+    lines.push(`========================================`);
+    lines.push(`${overallFlag} 总分: ${ps.totalScore}/${ps.maxScore}分 | 得分率: ${ps.overallPercentage.toFixed(1)}% | 整体: ${ps.passed ? '已达标' : '待努力'}`);
+    lines.push('');
+
+    for (const qr of ps.questionResults.sort((a, b) => a.percentage - b.percentage)) {
+      const fb = ps.studentFeedback[qr.questionId];
+      const cm = ps.teacherComment[qr.questionId];
+      const qFlag = qr.percentage >= 90 ? '⭐' : qr.passed ? '✅' : '❌';
+      lines.push(`【题目${qr.questionId}】 ${qFlag} ${qr.earnedScore}/${qr.totalScore}分 (${qr.percentage.toFixed(1)}%)`);
+
+      if (options.includeStudentFeedback !== false && fb) {
+        lines.push(`  📢 学生反馈: ${fb.overallMessage}`);
+        if (fb.strengths.length > 0) {
+          lines.push(`  ✅ 优点: ${fb.strengths.slice(0, 2).join('；')}`);
+        }
+        if (fb.improvements.length > 0) {
+          lines.push(`  ⚠️ 改进: ${fb.improvements.slice(0, 2).join('；')}`);
+        }
+        if (fb.encouragement) {
+          lines.push(`  💪 鼓励: ${fb.encouragement}`);
+        }
+      }
+
+      if (options.includeTeacherComment !== false && cm) {
+        lines.push(`  👩‍🏫 教师评语: ${cm.overallComment}`);
+        if (cm.followUpQuestions.length > 0) {
+          lines.push(`  ❓ 跟进问题: ${cm.followUpQuestions.slice(0, 2).join('；')}`);
+        }
+      }
+      lines.push('');
     }
 
     return lines.join('\n');

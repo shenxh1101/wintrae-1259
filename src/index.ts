@@ -18,6 +18,7 @@ import {
   ExportOptions,
   BatchFeedbackRequest,
   BatchFeedbackResult,
+  BatchExportOptions,
 } from './types';
 
 import { QuestionRuleEngine } from './core/QuestionRuleEngine';
@@ -238,6 +239,10 @@ export class HomeworkGradingSDK {
 
   formatBatchFeedback(result: BatchFeedbackResult): string {
     return this.batchFeedbackGenerator.formatBatchResult(result);
+  }
+
+  exportBatchFeedback(result: BatchFeedbackResult, options: BatchExportOptions): string {
+    return this.batchFeedbackGenerator.exportByView(result, options);
   }
 
   getStudentFeedback(

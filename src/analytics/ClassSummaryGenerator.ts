@@ -16,6 +16,8 @@ import {
   WeakPoint,
   ExportOptions,
   ExportFormat,
+  StudentOverallScore,
+  StudentFilteredDetail,
 } from '../types';
 import { ErrorClassifier } from '../grading/ErrorClassifier';
 
@@ -58,45 +60,48 @@ export class ClassSummaryGenerator {
   generate(context: ClassSummaryContext): ClassSummaryMetrics {
     const { taskId, taskTitle, classId, totalStudents, results, questionRules } = context;
 
-    const submittedCount = this.countSubmittedStudents(results);
+    const studentScores = this.calculateStudentOverallScores(results, questionRules);
+    const submittedStudents = studentScores.filter(s => s.answeredQuestionCount > 0);
+    const submittedCount = submittedStudents.length;
     const submissionRate = totalStudents > 0 ? submittedCount / totalStudents : 0;
 
-    const allScores = results.map(r => r.earnedScore);
-    const totalScores = results.map(r => r.totalScore);
-    const maxTotalScore = Math.max(...totalScores, 1);
-
-    const averageScore =
+    const percentages = submittedStudents.map(s => s.percentage);
+    const averagePercentage =
       submittedCount > 0
-        ? allScores.reduce((sum, s) => sum + s, 0) / submittedCount
+        ? percentages.reduce((s, v) => s + v, 0) / submittedCount
         : 0;
-    const medianScore = this.calculateMedian(allScores);
-    const highestScore = Math.max(...allScores, 0);
-    const lowestScore = Math.min(...allScores, 0);
+    const totalMaxScore = questionRules.reduce((s, q) => s + q.totalScore, 0);
+    const averageScore = (averagePercentage / 100) * totalMaxScore;
 
-    const passCount = results.filter(r => r.passed).length;
-    const passRate = submittedCount > 0 ? passCount / submittedCount : 0;
+    const medianPercentage = this.calculateMedian(percentages);
+    const medianScore = (medianPercentage / 100) * totalMaxScore;
 
-    const excellentCount = results.filter(r => r.percentage >= 90).length;
-    const excellentRate = submittedCount > 0 ? excellentCount / submittedCount : 0;
+    const highestPercentage = percentages.length > 0 ? Math.max(...percentages) : 0;
+    const lowestPercentage = percentages.length > 0 ? Math.min(...percentages) : 0;
+    const highestScore = (highestPercentage / 100) * totalMaxScore;
+    const lowestScore = (lowestPercentage / 100) * totalMaxScore;
+
+    const passRate = submittedCount > 0
+      ? submittedStudents.filter(s => s.passed).length / submittedCount
+      : 0;
+    const excellentRate = submittedCount > 0
+      ? submittedStudents.filter(s => s.percentage >= 90).length / submittedCount
+      : 0;
 
     const averageAttempts =
-      submittedCount > 0
-        ? results.reduce((sum, r) => sum + r.attemptNumber, 0) / submittedCount
+      results.length > 0
+        ? results.reduce((sum, r) => sum + r.attemptNumber, 0) / results.length
         : 0;
 
-    const scoreDistribution = this.calculateScoreDistribution(results);
-    const questionPerformance = this.generateQuestionPerformance(
-      results,
-      questionRules,
-    );
+    const scoreDistribution = this.calculateScoreDistributionByStudent(submittedStudents);
+    const questionPerformance = this.generateQuestionPerformance(results, questionRules);
     const tagPerformance = this.generateTagPerformance(results, questionRules);
     const errorDistribution = this.generateErrorDistribution(results);
     const commonErrors = this.generateCommonErrors(results);
     const overallAssessment = this.generateOverallAssessment(
       passRate,
       excellentRate,
-      averageScore,
-      maxTotalScore,
+      averagePercentage,
       submissionRate,
       commonErrors,
       tagPerformance,
@@ -118,6 +123,7 @@ export class ClassSummaryGenerator {
       averageAttempts,
       overallAssessment,
       scoreDistribution,
+      studentScores,
       questionPerformance,
       tagPerformance,
       errorDistribution,
@@ -126,28 +132,80 @@ export class ClassSummaryGenerator {
     };
   }
 
+  private calculateStudentOverallScores(
+    results: GradingResult[],
+    questionRules: QuestionRule[],
+  ): StudentOverallScore[] {
+    const studentMap = new Map<string, { earned: number; max: number; answered: Set<string> }>();
+    const totalMax = questionRules.reduce((s, q) => s + q.totalScore, 0);
+
+    for (const r of results) {
+      if (!studentMap.has(r.studentId)) {
+        studentMap.set(r.studentId, { earned: 0, max: totalMax, answered: new Set() });
+      }
+      const data = studentMap.get(r.studentId)!;
+      data.earned += r.earnedScore;
+      data.answered.add(r.questionId);
+    }
+
+    const scores: StudentOverallScore[] = [];
+    for (const [studentId, data] of studentMap.entries()) {
+      const percentage = data.max > 0 ? (data.earned / data.max) * 100 : 0;
+      scores.push({
+        studentId,
+        totalEarned: data.earned,
+        totalMax: data.max,
+        percentage,
+        passed: percentage >= 60,
+        answeredQuestionCount: data.answered.size,
+      });
+    }
+    return scores;
+  }
+
+  private calculateScoreDistributionByStudent(students: StudentOverallScore[]): ScoreDistribution {
+    const total = students.length || 1;
+    let excellentCount = 0, goodCount = 0, passCount = 0, failCount = 0;
+
+    for (const s of students) {
+      if (s.percentage >= 90) excellentCount++;
+      else if (s.percentage >= 75) goodCount++;
+      else if (s.percentage >= 60) passCount++;
+      else failCount++;
+    }
+
+    return {
+      excellentCount, excellentRate: excellentCount / total,
+      goodCount, goodRate: goodCount / total,
+      passCount, passRate: passCount / total,
+      failCount, failRate: failCount / total,
+    };
+  }
+
   generateFilteredViewByTag(
     context: ClassSummaryContext,
     tag: QuestionTag,
   ): FilteredSummaryView {
-    const { results, questionRules } = context;
+    const { results, questionRules, totalStudents } = context;
     const filteredRules = questionRules.filter(r => r.tags.includes(tag));
     const filteredQuestionIds = new Set(filteredRules.map(r => r.questionId));
     const filteredResults = results.filter(r => filteredQuestionIds.has(r.questionId));
 
     const answeredStudents = this.countSubmittedStudents(filteredResults);
-    const averageScore =
-      answeredStudents > 0
-        ? filteredResults.reduce((sum, r) => sum + r.earnedScore, 0) / answeredStudents
-        : 0;
-    const passRate =
-      answeredStudents > 0
-        ? filteredResults.filter(r => r.passed).length / answeredStudents
-        : 0;
+    const studentDetails = this.buildStudentFilteredDetails(filteredResults, filteredRules);
+    const avgPct = studentDetails.length > 0
+      ? studentDetails.reduce((s, d) => s + d.percentage, 0) / studentDetails.length
+      : 0;
+    const totalMax = filteredRules.reduce((s, q) => s + q.totalScore, 0);
+    const averageScore = (avgPct / 100) * totalMax;
+    const passRate = studentDetails.length > 0
+      ? studentDetails.filter(d => d.passed).length / studentDetails.length
+      : 0;
 
     const questionPerformance = this.generateQuestionPerformance(filteredResults, filteredRules);
     const commonErrors = this.generateCommonErrors(filteredResults);
     const weakPoints = this.identifyWeakPoints(commonErrors, questionPerformance, answeredStudents);
+    const suggestedTeachingOrder = this.suggestTeachingOrder(questionPerformance, commonErrors);
 
     return {
       filterType: 'tag',
@@ -160,6 +218,8 @@ export class ClassSummaryGenerator {
       weakPoints,
       questionPerformance,
       commonErrors,
+      studentDetails,
+      suggestedTeachingOrder,
     };
   }
 
@@ -167,24 +227,26 @@ export class ClassSummaryGenerator {
     context: ClassSummaryContext,
     questionType: QuestionType,
   ): FilteredSummaryView {
-    const { results, questionRules } = context;
+    const { results, questionRules, totalStudents } = context;
     const filteredRules = questionRules.filter(r => r.questionType === questionType);
     const filteredQuestionIds = new Set(filteredRules.map(r => r.questionId));
     const filteredResults = results.filter(r => filteredQuestionIds.has(r.questionId));
 
     const answeredStudents = this.countSubmittedStudents(filteredResults);
-    const averageScore =
-      answeredStudents > 0
-        ? filteredResults.reduce((sum, r) => sum + r.earnedScore, 0) / answeredStudents
-        : 0;
-    const passRate =
-      answeredStudents > 0
-        ? filteredResults.filter(r => r.passed).length / answeredStudents
-        : 0;
+    const studentDetails = this.buildStudentFilteredDetails(filteredResults, filteredRules);
+    const avgPct = studentDetails.length > 0
+      ? studentDetails.reduce((s, d) => s + d.percentage, 0) / studentDetails.length
+      : 0;
+    const totalMax = filteredRules.reduce((s, q) => s + q.totalScore, 0);
+    const averageScore = (avgPct / 100) * totalMax;
+    const passRate = studentDetails.length > 0
+      ? studentDetails.filter(d => d.passed).length / studentDetails.length
+      : 0;
 
     const questionPerformance = this.generateQuestionPerformance(filteredResults, filteredRules);
     const commonErrors = this.generateCommonErrors(filteredResults);
     const weakPoints = this.identifyWeakPoints(commonErrors, questionPerformance, answeredStudents);
+    const suggestedTeachingOrder = this.suggestTeachingOrder(questionPerformance, commonErrors);
 
     return {
       filterType: 'questionType',
@@ -197,7 +259,207 @@ export class ClassSummaryGenerator {
       weakPoints,
       questionPerformance,
       commonErrors,
+      studentDetails,
+      suggestedTeachingOrder,
     };
+  }
+
+  private buildStudentFilteredDetails(
+    results: GradingResult[],
+    filteredRules: QuestionRule[],
+  ): StudentFilteredDetail[] {
+    const byStudent = new Map<string, GradingResult[]>();
+    for (const r of results) {
+      if (!byStudent.has(r.studentId)) byStudent.set(r.studentId, []);
+      byStudent.get(r.studentId)!.push(r);
+    }
+
+    const totalMax = filteredRules.reduce((s, q) => s + q.totalScore, 0);
+    const details: StudentFilteredDetail[] = [];
+
+    for (const [studentId, studentResults] of byStudent.entries()) {
+      const earned = studentResults.reduce((s, r) => s + r.earnedScore, 0);
+      const percentage = totalMax > 0 ? (earned / totalMax) * 100 : 0;
+
+      const weakQuestions = studentResults
+        .filter(r => !r.passed || r.percentage < 60)
+        .map(r => ({
+          questionId: r.questionId,
+          earnedScore: r.earnedScore,
+          totalScore: r.totalScore,
+          passRate: r.percentage,
+        }))
+        .sort((a, b) => a.passRate - b.passRate);
+
+      const errorCount = new Map<string, { category: string; description: string; count: number }>();
+      for (const r of studentResults) {
+        if (!r.errors) continue;
+        for (const e of r.errors) {
+          const key = `${e.category}_${e.description}`;
+          if (!errorCount.has(key)) {
+            errorCount.set(key, {
+              category: this.errorClassifier.getCategoryName(e.category),
+              description: e.description,
+              count: 0,
+            });
+          }
+          errorCount.get(key)!.count++;
+        }
+      }
+      const mainErrors = Array.from(errorCount.values())
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 3);
+
+      details.push({
+        studentId,
+        totalEarned: earned,
+        totalMax,
+        percentage,
+        passed: percentage >= 60,
+        weakQuestions,
+        mainErrors,
+      });
+    }
+
+    return details.sort((a, b) => a.percentage - b.percentage);
+  }
+
+  private suggestTeachingOrder(
+    questionPerformance: QuestionPerformance[],
+    commonErrors: CommonError[],
+  ): { questionId: string; priority: 'high' | 'medium' | 'low'; reason: string }[] {
+    const result: { questionId: string; priority: 'high' | 'medium' | 'low'; reason: string }[] = [];
+
+    const sorted = [...questionPerformance].sort((a, b) => a.passRate - b.passRate);
+
+    for (const qp of sorted) {
+      let priority: 'high' | 'medium' | 'low';
+      let reason = '';
+
+      if (qp.passRate < 0.5) {
+        priority = 'high';
+        reason = `正确率仅${(qp.passRate * 100).toFixed(0)}%，多数学生未掌握，需优先讲解`;
+      } else if (qp.passRate < 0.75) {
+        priority = 'medium';
+        reason = `正确率${(qp.passRate * 100).toFixed(0)}%，部分学生存在疑问，建议复习`;
+      } else {
+        priority = 'low';
+        reason = `正确率${(qp.passRate * 100).toFixed(0)}%，掌握较好，可略讲或跳过`;
+      }
+
+      result.push({ questionId: qp.questionId, priority, reason });
+    }
+
+    return result;
+  }
+
+  generateLessonReview(summary: ClassSummaryMetrics): string {
+    const lines: string[] = [];
+    const taskName = summary.taskTitle || '本次作业';
+
+    lines.push(`========================================`);
+    lines.push(`   📝 教案复盘 - ${taskName}`);
+    lines.push(`========================================`);
+    lines.push(`班级：${summary.classId}  |  生成时间：${summary.generatedAt.toLocaleString()}`);
+    lines.push('');
+
+    lines.push(`【一、核心指标速览】`);
+    lines.push(`  📤 提交率：${(summary.submissionRate * 100).toFixed(1)}%  (${summary.submittedCount}/${summary.totalStudents}人)`);
+    lines.push(`  📊 班级均分：${summary.averageScore.toFixed(1)}分`);
+    lines.push(`  ✅ 及格率：${(summary.passRate * 100).toFixed(1)}%`);
+    lines.push(`  ⭐ 优秀率：${(summary.excellentRate * 100).toFixed(1)}%`);
+    const sd = summary.scoreDistribution;
+    lines.push(`  📈 分布：优秀${sd.excellentCount}人 / 良好${sd.goodCount}人 / 及格${sd.passCount}人 / 待提升${sd.failCount}人`);
+    lines.push('');
+
+    lines.push(`【二、整体判断】`);
+    lines.push(`  ${summary.overallAssessment.levelLabel}：${summary.overallAssessment.summary}`);
+    if (summary.overallAssessment.highlights.length > 0) {
+      lines.push(`  ✅ 亮点：`);
+      for (const h of summary.overallAssessment.highlights) {
+        lines.push(`     • ${h}`);
+      }
+    }
+    if (summary.overallAssessment.concerns.length > 0) {
+      lines.push(`  ⚠️ 问题：`);
+      for (const c of summary.overallAssessment.concerns) {
+        lines.push(`     • ${c}`);
+      }
+    }
+    lines.push('');
+
+    lines.push(`【三、共性问题分析】`);
+    if (summary.commonErrors.length === 0) {
+      lines.push(`  无明显共性问题，整体掌握较好。`);
+    } else {
+      for (let i = 0; i < Math.min(5, summary.commonErrors.length); i++) {
+        const e = summary.commonErrors[i];
+        const rate = summary.submittedCount > 0 ? (e.affectedStudents / summary.submittedCount * 100) : 0;
+        lines.push(`  ${i + 1}. 【${e.categoryName}】${e.description}`);
+        lines.push(`     影响人数：${e.affectedStudents}人 (${rate.toFixed(0)}%)  |  出现：${e.occurrenceCount}次`);
+        lines.push(`     建议：${e.suggestion || '针对性讲解与练习'}`);
+      }
+    }
+    lines.push('');
+
+    lines.push(`【四、知识点掌握情况】`);
+    if (summary.tagPerformance.length > 0) {
+      const sortedTags = [...summary.tagPerformance].sort((a, b) => a.passRate - b.passRate);
+      for (const tag of sortedTags) {
+        const flag = tag.passRate >= 0.8 ? '✅' : tag.passRate >= 0.6 ? '⚠️' : '❌';
+        lines.push(`  ${flag} ${tag.tagName}(${tag.questionCount}题)：正确率${(tag.passRate * 100).toFixed(0)}%  均分${tag.averageScore.toFixed(1)}`);
+      }
+    }
+    lines.push('');
+
+    lines.push(`【五、下节课讲解顺序建议】`);
+    if (summary.questionPerformance.length > 0) {
+      const orderedQ = [...summary.questionPerformance].sort((a, b) => a.passRate - b.passRate);
+      for (let i = 0; i < orderedQ.length; i++) {
+        const q = orderedQ[i];
+        let priority = '';
+        if (q.passRate < 0.5) priority = '🔥 优先讲';
+        else if (q.passRate < 0.75) priority = '📌 建议讲';
+        else priority = '💡 可选讲';
+        lines.push(`  ${i + 1}. 题目${q.questionId} - ${priority}（正确率${(q.passRate * 100).toFixed(0)}%）`);
+      }
+    }
+    lines.push('');
+
+    lines.push(`【六、教研组简报（可直接转发）】`);
+    const conclusion = this.buildTeachingGroupConclusion(summary);
+    lines.push(`  ${conclusion}`);
+
+    return lines.join('\n');
+  }
+
+  private buildTeachingGroupConclusion(summary: ClassSummaryMetrics): string {
+    const parts: string[] = [];
+    const taskName = summary.taskTitle || '本次作业';
+    parts.push(`【${summary.classId} ${taskName}】`);
+
+    if (summary.passRate >= 0.85) parts.push('整体掌握优秀');
+    else if (summary.passRate >= 0.7) parts.push('整体掌握良好');
+    else if (summary.passRate >= 0.5) parts.push('整体中等');
+    else parts.push('基础需加强');
+
+    parts.push(`及格${(summary.passRate * 100).toFixed(0)}% 优秀${(summary.excellentRate * 100).toFixed(0)}%`);
+
+    const lowTags = summary.tagPerformance.filter(t => t.passRate < 0.6);
+    if (lowTags.length > 0) {
+      const tagNames = lowTags.map(t => t.tagName).join('、');
+      parts.push(`薄弱点：${tagNames}`);
+    }
+
+    if (summary.commonErrors.length > 0) {
+      parts.push(`主要问题：${summary.commonErrors[0].categoryName}`);
+    }
+
+    if (summary.overallAssessment.actionItems.length > 0) {
+      parts.push(`建议：${summary.overallAssessment.actionItems[0]}`);
+    }
+
+    return parts.join(' | ');
   }
 
   private identifyWeakPoints(
@@ -215,7 +477,7 @@ export class ClassSummaryGenerator {
         name: '低正确率题目',
         impactCount: lowPerfQuestions.length,
         impactRate: lowPerfQuestions.length / Math.max(questionPerformance.length, 1),
-        relatedErrors: lowPerfQuestions.map(q => `题目${q.questionId}(正确率${(qp => (qp.passRate * 100).toFixed(0))(q)}%)`),
+        relatedErrors: lowPerfQuestions.map(q => `题目${q.questionId}(正确率${(q.passRate * 100).toFixed(0)}%)`),
         suggestion: '建议重点讲解这些题目的核心知识点，安排针对性练习',
       });
     }
@@ -235,37 +497,10 @@ export class ClassSummaryGenerator {
     return weakPoints;
   }
 
-  private calculateScoreDistribution(results: GradingResult[]): ScoreDistribution {
-    const total = results.length || 1;
-    let excellentCount = 0;
-    let goodCount = 0;
-    let passCount = 0;
-    let failCount = 0;
-
-    for (const r of results) {
-      if (r.percentage >= 90) excellentCount++;
-      else if (r.percentage >= 75) goodCount++;
-      else if (r.percentage >= 60) passCount++;
-      else failCount++;
-    }
-
-    return {
-      excellentCount,
-      excellentRate: excellentCount / total,
-      goodCount,
-      goodRate: goodCount / total,
-      passCount,
-      passRate: passCount / total,
-      failCount,
-      failRate: failCount / total,
-    };
-  }
-
   private generateOverallAssessment(
     passRate: number,
     excellentRate: number,
-    averageScore: number,
-    maxScore: number,
+    averagePercentage: number,
     submissionRate: number,
     commonErrors: CommonError[],
     tagPerformance: TagPerformance[],
@@ -275,8 +510,6 @@ export class ClassSummaryGenerator {
     const highlights: string[] = [];
     const concerns: string[] = [];
     const actionItems: string[] = [];
-
-    const averagePercentage = maxScore > 0 ? (averageScore / maxScore) * 100 : 0;
 
     if (submissionRate < 0.3) {
       level = 'insufficient_data';
@@ -334,16 +567,16 @@ export class ClassSummaryGenerator {
     let summary = '';
     switch (level) {
       case 'excellent':
-        summary = `本次作业整体表现优秀！平均分${averageScore.toFixed(1)}分，大部分学生掌握良好，部分学生表现突出。`;
+        summary = `本次作业整体表现优秀！${(averagePercentage).toFixed(1)}%的平均得分率，大部分学生掌握良好，部分学生表现突出。`;
         break;
       case 'good':
-        summary = `本次作业整体表现良好。平均分${averageScore.toFixed(1)}分，多数学生掌握了核心内容，仍有提升空间。`;
+        summary = `本次作业整体表现良好。平均得分率${(averagePercentage).toFixed(1)}%，多数学生掌握了核心内容，仍有提升空间。`;
         break;
       case 'fair':
-        summary = `本次作业整体处于中等水平。平均分${averageScore.toFixed(1)}分，两极分化可能存在，需要关注中下游学生。`;
+        summary = `本次作业整体处于中等水平。平均得分率${(averagePercentage).toFixed(1)}%，两极分化可能存在，需要关注中下游学生。`;
         break;
       case 'poor':
-        summary = `本次作业整体情况需要加强。平均分${averageScore.toFixed(1)}分，基础知识点掌握不够扎实，建议安排复习。`;
+        summary = `本次作业整体情况需要加强。平均得分率仅${(averagePercentage).toFixed(1)}%，基础知识点掌握不够扎实，建议安排复习。`;
         break;
       case 'insufficient_data':
         summary = `提交数据不足，暂无法做出全面判断。请等待更多学生提交后再查看。`;
@@ -360,14 +593,7 @@ export class ClassSummaryGenerator {
       actionItems.push('保持当前学习节奏，适当进行拓展练习');
     }
 
-    return {
-      level,
-      levelLabel,
-      summary,
-      highlights,
-      concerns,
-      actionItems,
-    };
+    return { level, levelLabel, summary, highlights, concerns, actionItems };
   }
 
   private countSubmittedStudents(results: GradingResult[]): number {
@@ -377,14 +603,9 @@ export class ClassSummaryGenerator {
 
   private calculateMedian(values: number[]): number {
     if (values.length === 0) return 0;
-
     const sorted = [...values].sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
-
-    if (sorted.length % 2 === 0) {
-      return (sorted[mid - 1] + sorted[mid]) / 2;
-    }
-
+    if (sorted.length % 2 === 0) return (sorted[mid - 1] + sorted[mid]) / 2;
     return sorted[mid];
   }
 
@@ -393,7 +614,6 @@ export class ClassSummaryGenerator {
     questionRules: QuestionRule[],
   ): QuestionPerformance[] {
     const questionMap = new Map<string, GradingResult[]>();
-
     for (const result of results) {
       if (!questionMap.has(result.questionId)) {
         questionMap.set(result.questionId, []);
@@ -404,23 +624,18 @@ export class ClassSummaryGenerator {
     return questionRules.map(rule => {
       const questionResults = questionMap.get(rule.questionId) || [];
       const scores = questionResults.map(r => r.earnedScore);
-      const averageScore =
-        questionResults.length > 0
-          ? scores.reduce((sum, s) => sum + s, 0) / questionResults.length
-          : 0;
+      const averageScore = questionResults.length > 0
+        ? scores.reduce((sum, s) => sum + s, 0) / questionResults.length
+        : 0;
       const passCount = questionResults.filter(r => r.passed).length;
-      const passRate =
-        questionResults.length > 0 ? passCount / questionResults.length : 0;
+      const passRate = questionResults.length > 0 ? passCount / questionResults.length : 0;
 
       return {
         questionId: rule.questionId,
         averageScore,
         passRate,
         difficulty: rule.difficulty,
-        discriminationIndex: this.calculateDiscriminationIndex(
-          questionResults,
-          rule.totalScore,
-        ),
+        discriminationIndex: this.calculateDiscriminationIndex(questionResults, rule.totalScore),
       };
     });
   }
@@ -430,19 +645,12 @@ export class ClassSummaryGenerator {
     maxScore: number,
   ): number | undefined {
     if (results.length < 4) return undefined;
-
-    const sorted = [...results].sort(
-      (a, b) => b.earnedScore - a.earnedScore,
-    );
+    const sorted = [...results].sort((a, b) => b.earnedScore - a.earnedScore);
     const groupSize = Math.floor(results.length / 4);
     const highGroup = sorted.slice(0, groupSize);
     const lowGroup = sorted.slice(-groupSize);
-
-    const highAverage =
-      highGroup.reduce((sum, r) => sum + r.earnedScore, 0) / highGroup.length;
-    const lowAverage =
-      lowGroup.reduce((sum, r) => sum + r.earnedScore, 0) / lowGroup.length;
-
+    const highAverage = highGroup.reduce((sum, r) => sum + r.earnedScore, 0) / highGroup.length;
+    const lowAverage = lowGroup.reduce((sum, r) => sum + r.earnedScore, 0) / lowGroup.length;
     return maxScore > 0 ? (highAverage - lowAverage) / maxScore : 0;
   }
 
@@ -450,23 +658,18 @@ export class ClassSummaryGenerator {
     results: GradingResult[],
     questionRules: QuestionRule[],
   ): TagPerformance[] {
-    const tagMap = new Map<
-      QuestionTag,
-      { scores: number[]; passCount: number; total: number }
-    >();
+    const tagMap = new Map<QuestionTag, { scores: number[]; passCount: number; total: number }>();
+    const tagQuestionCount = new Map<QuestionTag, number>();
 
     for (const rule of questionRules) {
       for (const tag of rule.tags) {
-        if (!tagMap.has(tag)) {
-          tagMap.set(tag, { scores: [], passCount: 0, total: 0 });
-        }
+        if (!tagMap.has(tag)) tagMap.set(tag, { scores: [], passCount: 0, total: 0 });
+        if (!tagQuestionCount.has(tag)) tagQuestionCount.set(tag, 0);
+        tagQuestionCount.set(tag, (tagQuestionCount.get(tag) || 0) + 1);
 
-        const questionResults = results.filter(
-          r => r.questionId === rule.questionId,
-        );
+        const questionResults = results.filter(r => r.questionId === rule.questionId);
         const tagData = tagMap.get(tag)!;
         tagData.total += questionResults.length;
-
         for (const r of questionResults) {
           tagData.scores.push(r.earnedScore);
           if (r.passed) tagData.passCount++;
@@ -475,39 +678,21 @@ export class ClassSummaryGenerator {
     }
 
     const performance: TagPerformance[] = [];
-    const tagQuestionCount = new Map<QuestionTag, number>();
-
-    for (const rule of questionRules) {
-      for (const tag of rule.tags) {
-        tagQuestionCount.set(tag, (tagQuestionCount.get(tag) || 0) + 1);
-      }
-    }
-
     for (const [tag, data] of tagMap.entries()) {
-      const averageScore =
-        data.total > 0
-          ? data.scores.reduce((sum, s) => sum + s, 0) / data.total
-          : 0;
-      const passRate = data.total > 0 ? data.passCount / data.total : 0;
-
       performance.push({
         tag,
         tagName: this.tagNames[tag] || tag,
-        averageScore,
-        passRate,
+        averageScore: data.total > 0 ? data.scores.reduce((s, v) => s + v, 0) / data.total : 0,
+        passRate: data.total > 0 ? data.passCount / data.total : 0,
         questionCount: tagQuestionCount.get(tag) || 0,
       });
     }
-
     return performance;
   }
 
-  private generateErrorDistribution(
-    results: GradingResult[],
-  ): ErrorDistribution[] {
+  private generateErrorDistribution(results: GradingResult[]): ErrorDistribution[] {
     const errorCount = new Map<ErrorCategory, number>();
     let totalErrors = 0;
-
     for (const result of results) {
       if (!result.errors) continue;
       for (const error of result.errors) {
@@ -515,7 +700,6 @@ export class ClassSummaryGenerator {
         totalErrors++;
       }
     }
-
     const distribution: ErrorDistribution[] = [];
     for (const [category, count] of errorCount.entries()) {
       distribution.push({
@@ -525,28 +709,22 @@ export class ClassSummaryGenerator {
         percentage: totalErrors > 0 ? count / totalErrors : 0,
       });
     }
-
     return distribution.sort((a, b) => b.count - a.count);
   }
 
   private generateCommonErrors(results: GradingResult[]): CommonError[] {
-    const errorMap = new Map<
-      string,
-      {
-        category: ErrorCategory;
-        description: string;
-        suggestion: string;
-        occurrenceCount: number;
-        affectedStudents: Set<string>;
-      }
-    >();
+    const errorMap = new Map<string, {
+      category: ErrorCategory;
+      description: string;
+      suggestion: string;
+      occurrenceCount: number;
+      affectedStudents: Set<string>;
+    }>();
 
     for (const result of results) {
       if (!result.errors) continue;
-
       for (const error of result.errors) {
         const key = `${error.category}_${error.description}`;
-
         if (!errorMap.has(key)) {
           errorMap.set(key, {
             category: error.category,
@@ -556,7 +734,6 @@ export class ClassSummaryGenerator {
             affectedStudents: new Set(),
           });
         }
-
         const data = errorMap.get(key)!;
         data.occurrenceCount++;
         data.affectedStudents.add(result.studentId);
@@ -574,24 +751,19 @@ export class ClassSummaryGenerator {
         suggestion: data.suggestion,
       });
     }
-
-    return commonErrors
-      .sort((a, b) => b.occurrenceCount - a.occurrenceCount)
-      .slice(0, 10);
+    return commonErrors.sort((a, b) => b.occurrenceCount - a.occurrenceCount).slice(0, 10);
   }
 
   formatSummary(summary: ClassSummaryMetrics): string {
     const lines: string[] = [];
-
     lines.push(`========================================`);
     lines.push(`         班级作业总览报告`);
     lines.push(`========================================`);
-    if (summary.taskTitle) {
-      lines.push(`📋 作业名称: ${summary.taskTitle}`);
-    }
+    if (summary.taskTitle) lines.push(`📋 作业名称: ${summary.taskTitle}`);
     lines.push(`👥 班级: ${summary.classId}`);
     lines.push(`🆔 任务编号: ${summary.taskId}`);
     lines.push(`🕐 生成时间: ${summary.generatedAt.toLocaleString()}`);
+    lines.push(`📐 统计口径: 按学生整份作业计算（一人算一次）`);
     lines.push('');
 
     lines.push(`🎯 整体评价: 【${summary.overallAssessment.levelLabel}】`);
@@ -600,41 +772,32 @@ export class ClassSummaryGenerator {
 
     if (summary.overallAssessment.highlights.length > 0) {
       lines.push(`✅ 亮点:`);
-      for (const h of summary.overallAssessment.highlights) {
-        lines.push(`   • ${h}`);
-      }
+      for (const h of summary.overallAssessment.highlights) lines.push(`   • ${h}`);
       lines.push('');
     }
-
     if (summary.overallAssessment.concerns.length > 0) {
       lines.push(`⚠️ 需关注:`);
-      for (const c of summary.overallAssessment.concerns) {
-        lines.push(`   • ${c}`);
-      }
+      for (const c of summary.overallAssessment.concerns) lines.push(`   • ${c}`);
       lines.push('');
     }
-
     if (summary.overallAssessment.actionItems.length > 0) {
       lines.push(`📝 下一步建议:`);
-      for (const a of summary.overallAssessment.actionItems) {
-        lines.push(`   • ${a}`);
-      }
+      for (const a of summary.overallAssessment.actionItems) lines.push(`   • ${a}`);
       lines.push('');
     }
 
     lines.push(`----------------------------------------`);
-    lines.push(`📊 核心指标`);
+    lines.push(`📊 核心指标（按学生统计）`);
     lines.push(`----------------------------------------`);
     lines.push(`  提交率:     ${(summary.submissionRate * 100).toFixed(1)}%  (${summary.submittedCount}/${summary.totalStudents}人)`);
-    lines.push(`  平均分:     ${summary.averageScore.toFixed(1)}`);
+    lines.push(`  班级均分:   ${summary.averageScore.toFixed(1)}分`);
     lines.push(`  及格率:     ${(summary.passRate * 100).toFixed(1)}%`);
     lines.push(`  优秀率:     ${(summary.excellentRate * 100).toFixed(1)}%`);
-    lines.push(`  中位数:     ${summary.medianScore.toFixed(1)}`);
-    lines.push(`  最高分/最低分: ${summary.highestScore} / ${summary.lowestScore}`);
-    lines.push(`  平均尝试次数: ${summary.averageAttempts.toFixed(1)}次`);
+    lines.push(`  中位数:     ${summary.medianScore.toFixed(1)}分`);
+    lines.push(`  最高分/最低分: ${summary.highestScore.toFixed(1)} / ${summary.lowestScore.toFixed(1)}`);
     lines.push('');
 
-    lines.push(`  成绩分布:`);
+    lines.push(`  成绩分布（按学生）:`);
     const sd = summary.scoreDistribution;
     lines.push(`    优秀(≥90): ${sd.excellentCount}人 (${(sd.excellentRate * 100).toFixed(1)}%) ${this.buildBar(sd.excellentRate)}`);
     lines.push(`    良好(75-89): ${sd.goodCount}人 (${(sd.goodRate * 100).toFixed(1)}%) ${this.buildBar(sd.goodRate)}`);
@@ -661,11 +824,10 @@ export class ClassSummaryGenerator {
       lines.push(`----------------------------------------`);
       for (let i = 0; i < Math.min(5, summary.commonErrors.length); i++) {
         const error = summary.commonErrors[i];
+        const rate = summary.submittedCount > 0 ? (error.affectedStudents / summary.submittedCount * 100) : 0;
         lines.push(`  ${i + 1}. [${error.categoryName}] ${error.description}`);
-        lines.push(`     出现${error.occurrenceCount}次，影响${error.affectedStudents}人`);
-        if (error.suggestion) {
-          lines.push(`     建议: ${error.suggestion}`);
-        }
+        lines.push(`     出现${error.occurrenceCount}次，影响${error.affectedStudents}人(${rate.toFixed(0)}%)`);
+        if (error.suggestion) lines.push(`     建议: ${error.suggestion}`);
       }
     }
 
@@ -685,6 +847,16 @@ export class ClassSummaryGenerator {
     lines.push(`  正确率:   ${(view.passRate * 100).toFixed(1)}% ${statusEmoji} ${this.buildBar(view.passRate)}`);
     lines.push('');
 
+    if (view.suggestedTeachingOrder.length > 0) {
+      lines.push(`📖 建议讲解顺序:`);
+      for (let i = 0; i < view.suggestedTeachingOrder.length; i++) {
+        const s = view.suggestedTeachingOrder[i];
+        const icon = s.priority === 'high' ? '🔥' : s.priority === 'medium' ? '📌' : '💡';
+        lines.push(`  ${i + 1}. ${icon} 题目${s.questionId} - ${s.reason}`);
+      }
+      lines.push('');
+    }
+
     if (view.weakPoints.length > 0) {
       lines.push(`🔍 薄弱知识点:`);
       for (const wp of view.weakPoints) {
@@ -700,47 +872,49 @@ export class ClassSummaryGenerator {
         const err = view.commonErrors[i];
         lines.push(`  ${i + 1}. [${err.categoryName}] ${err.description}`);
       }
+      lines.push('');
+    }
+
+    if (view.studentDetails.length > 0) {
+      lines.push(`👤 学生专项得分（从低到高）:`);
+      const needAttention = view.studentDetails.filter(s => !s.passed);
+      const showList = needAttention.length > 0 ? needAttention : view.studentDetails.slice(0, Math.min(5, view.studentDetails.length));
+      for (const sd of showList) {
+        const flag = sd.passed ? '✅' : '❌';
+        lines.push(`  ${flag} ${sd.studentId}: ${sd.totalEarned}/${sd.totalMax}分 (${sd.percentage.toFixed(1)}%)`);
+        if (sd.weakQuestions.length > 0) {
+          const weakQids = sd.weakQuestions.map(q => q.questionId).join('、');
+          lines.push(`     薄弱题: ${weakQids}`);
+        }
+        if (sd.mainErrors.length > 0) {
+          const errors = sd.mainErrors.map(e => e.category).join('、');
+          lines.push(`     主要错: ${errors}`);
+        }
+      }
     }
 
     return lines.join('\n');
   }
 
-  exportForSharing(
-    summary: ClassSummaryMetrics,
-    options: ExportOptions = {},
-  ): string {
+  exportForSharing(summary: ClassSummaryMetrics, options: ExportOptions = {}): string {
     const format: ExportFormat = options.format || 'class_notice';
     const lines: string[] = [];
-
-    if (options.customHeader) {
-      lines.push(options.customHeader);
-      lines.push('');
-    }
+    if (options.customHeader) { lines.push(options.customHeader); lines.push(''); }
 
     switch (format) {
-      case 'class_notice':
-        lines.push(this.exportClassNotice(summary, options));
-        break;
-      case 'teaching_group':
-        lines.push(this.exportTeachingGroup(summary, options));
-        break;
-      case 'simple':
-        lines.push(this.exportSimple(summary, options));
-        break;
+      case 'class_notice': lines.push(this.exportClassNotice(summary, options)); break;
+      case 'teaching_group': lines.push(this.exportTeachingGroup(summary, options)); break;
+      case 'simple': lines.push(this.exportSimple(summary, options)); break;
+      case 'lesson_review': lines.push(this.generateLessonReview(summary)); break;
     }
 
-    if (options.customFooter) {
-      lines.push('');
-      lines.push(options.customFooter);
-    }
-
+    if (options.customFooter) { lines.push(''); lines.push(options.customFooter); }
     return lines.join('\n');
   }
 
   private exportClassNotice(summary: ClassSummaryMetrics, options: ExportOptions): string {
     const lines: string[] = [];
     const taskName = summary.taskTitle || '本次作业';
-
     lines.push(`各位同学和家长好！`);
     lines.push('');
     lines.push(`${taskName}已批改完成，以下是班级整体情况：`);
@@ -749,7 +923,6 @@ export class ClassSummaryGenerator {
     lines.push(`✅ 及格率：${(summary.passRate * 100).toFixed(1)}%`);
     lines.push(`⭐ 优秀率：${(summary.excellentRate * 100).toFixed(1)}%`);
     lines.push('');
-
     if (options.includeScoreDistribution) {
       const sd = summary.scoreDistribution;
       lines.push(`📈 成绩分布：`);
@@ -759,48 +932,39 @@ export class ClassSummaryGenerator {
       lines.push(`  需努力(<60分)：${sd.failCount}人`);
       lines.push('');
     }
-
     if (options.includeActionItems && summary.overallAssessment.actionItems.length > 0) {
       lines.push(`📝 老师建议：`);
-      for (const item of summary.overallAssessment.actionItems.slice(0, 3)) {
-        lines.push(`  • ${item}`);
-      }
+      for (const item of summary.overallAssessment.actionItems.slice(0, 3)) lines.push(`  • ${item}`);
       lines.push('');
     }
-
     lines.push(`请同学们查看自己的批改反馈，有问题及时请教老师。继续加油！💪`);
-
     return lines.join('\n');
   }
 
   private exportTeachingGroup(summary: ClassSummaryMetrics, options: ExportOptions): string {
     const lines: string[] = [];
     const taskName = summary.taskTitle || '本次作业';
-
     lines.push(`【教学分析】${taskName}`);
     lines.push(`班级：${summary.classId} | 生成时间：${summary.generatedAt.toLocaleString()}`);
     lines.push('');
     lines.push(`【整体评价】${summary.overallAssessment.levelLabel}`);
     lines.push(summary.overallAssessment.summary);
     lines.push('');
-
-    lines.push(`【核心指标】`);
+    lines.push(`【核心指标(按学生统计)】`);
     lines.push(`  提交率：${(summary.submissionRate * 100).toFixed(1)}% (${summary.submittedCount}/${summary.totalStudents})`);
     lines.push(`  平均分：${summary.averageScore.toFixed(1)}  中位数：${summary.medianScore.toFixed(1)}`);
     lines.push(`  及格率：${(summary.passRate * 100).toFixed(1)}%  优秀率：${(summary.excellentRate * 100).toFixed(1)}%`);
-    lines.push(`  最高分/最低分：${summary.highestScore} / ${summary.lowestScore}`);
+    lines.push(`  最高分/最低分：${summary.highestScore.toFixed(1)} / ${summary.lowestScore.toFixed(1)}`);
     lines.push('');
-
     if (options.includeScoreDistribution) {
       const sd = summary.scoreDistribution;
       lines.push(`【成绩分布】`);
-      lines.push(`  优秀：${sd.excellentCount}人(${ (sd.excellentRate * 100).toFixed(1)}%)`);
-      lines.push(`  良好：${sd.goodCount}人(${ (sd.goodRate * 100).toFixed(1)}%)`);
-      lines.push(`  及格：${sd.passCount}人(${ (sd.passRate * 100).toFixed(1)}%)`);
-      lines.push(`  不及格：${sd.failCount}人(${ (sd.failRate * 100).toFixed(1)}%)`);
+      lines.push(`  优秀：${sd.excellentCount}人(${(sd.excellentRate * 100).toFixed(1)}%)`);
+      lines.push(`  良好：${sd.goodCount}人(${(sd.goodRate * 100).toFixed(1)}%)`);
+      lines.push(`  及格：${sd.passCount}人(${(sd.passRate * 100).toFixed(1)}%)`);
+      lines.push(`  不及格：${sd.failCount}人(${(sd.failRate * 100).toFixed(1)}%)`);
       lines.push('');
     }
-
     if (summary.tagPerformance.length > 0) {
       lines.push(`【知识点掌握】`);
       for (const tag of summary.tagPerformance.sort((a, b) => a.passRate - b.passRate)) {
@@ -809,7 +973,6 @@ export class ClassSummaryGenerator {
       }
       lines.push('');
     }
-
     if (options.includeWeakPoints && summary.commonErrors.length > 0) {
       lines.push(`【常见问题】`);
       for (let i = 0; i < Math.min(3, summary.commonErrors.length); i++) {
@@ -819,25 +982,19 @@ export class ClassSummaryGenerator {
       }
       lines.push('');
     }
-
     if (options.includeActionItems && summary.overallAssessment.actionItems.length > 0) {
       lines.push(`【教学建议】`);
-      for (const item of summary.overallAssessment.actionItems) {
-        lines.push(`  • ${item}`);
-      }
+      for (const item of summary.overallAssessment.actionItems) lines.push(`  • ${item}`);
     }
-
     return lines.join('\n');
   }
 
   private exportSimple(summary: ClassSummaryMetrics, options: ExportOptions): string {
     const lines: string[] = [];
     const taskName = summary.taskTitle || '作业';
-
     lines.push(`${taskName} - 班级${summary.classId}`);
     lines.push(`平均分:${summary.averageScore.toFixed(1)} 及格率:${(summary.passRate * 100).toFixed(0)}% 优秀率:${(summary.excellentRate * 100).toFixed(0)}%`);
-    lines.push(`提交:${summary.submittedCount}/${summary.totalStudents}(${ (summary.submissionRate * 100).toFixed(0)}%)`);
-
+    lines.push(`提交:${summary.submittedCount}/${summary.totalStudents}(${(summary.submissionRate * 100).toFixed(0)}%)`);
     return lines.join('\n');
   }
 
