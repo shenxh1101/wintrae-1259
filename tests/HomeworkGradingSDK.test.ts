@@ -700,11 +700,85 @@ describe('HomeworkGradingSDK', () => {
       const summary = sdk.generateClassSummary('task001', 'class001', 10);
       const formatted = sdk.formatClassSummary(summary);
 
-      expect(formatted).toContain('=== 班级作业汇总报告 ===');
+      expect(formatted).toContain('班级作业总览报告');
       expect(formatted).toContain('班级: class001');
       expect(formatted).toContain('提交率:');
       expect(formatted).toContain('及格率:');
-      expect(formatted).toContain('--- 整体情况 ---');
+      expect(formatted).toContain('整体评价');
+      expect(formatted).toContain('核心指标');
+    });
+
+    it('should include overall assessment in summary', () => {
+      const summary = sdk.generateClassSummary('task001', 'class001', 10);
+
+      expect(summary.overallAssessment).toBeDefined();
+      expect(summary.overallAssessment.levelLabel).toBeDefined();
+      expect(summary.overallAssessment.summary.length).toBeGreaterThan(0);
+      expect(summary.overallAssessment.highlights.length).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should include score distribution', () => {
+      const summary = sdk.generateClassSummary('task001', 'class001', 10);
+
+      expect(summary.scoreDistribution).toBeDefined();
+      const sd = summary.scoreDistribution;
+      expect(sd.excellentCount + sd.goodCount + sd.passCount + sd.failCount).toBeGreaterThan(0);
+    });
+
+    it('should generate filtered summary by tag', () => {
+      const view = sdk.generateFilteredSummaryByTag('task001', 'class001', 10, 'foundation');
+
+      expect(view.filterType).toBe('tag');
+      expect(view.filterLabel).toContain('基础');
+      expect(view.totalQuestions).toBeGreaterThan(0);
+      expect(view.passRate).toBeGreaterThanOrEqual(0);
+      expect(view.passRate).toBeLessThanOrEqual(1);
+    });
+
+    it('should generate filtered summary by question type', () => {
+      const view = sdk.generateFilteredSummaryByQuestionType('task001', 'class001', 10, 'single_choice');
+
+      expect(view.filterType).toBe('questionType');
+      expect(view.filterLabel).toContain('单选');
+    });
+
+    it('should format filtered summary view', () => {
+      const view = sdk.generateFilteredSummaryByTag('task001', 'class001', 10, 'foundation');
+      const formatted = sdk.formatFilteredSummary(view);
+
+      expect(formatted).toContain('专项分析');
+      expect(formatted).toContain('正确率');
+    });
+
+    it('should export summary for class notice', () => {
+      const summary = sdk.generateClassSummary('task001', 'class001', 10);
+      const exported = sdk.exportClassSummary(summary, { format: 'class_notice' });
+
+      expect(exported).toContain('各位同学');
+      expect(exported).toContain('平均分');
+      expect(exported).toContain('及格率');
+    });
+
+    it('should export summary for teaching group', () => {
+      const summary = sdk.generateClassSummary('task001', 'class001', 10);
+      const exported = sdk.exportClassSummary(summary, {
+        format: 'teaching_group',
+        includeScoreDistribution: true,
+        includeWeakPoints: true,
+        includeActionItems: true,
+      });
+
+      expect(exported).toContain('教学分析');
+      expect(exported).toContain('整体评价');
+      expect(exported).toContain('核心指标');
+    });
+
+    it('should export simple summary', () => {
+      const summary = sdk.generateClassSummary('task001', 'class001', 10);
+      const exported = sdk.exportClassSummary(summary, { format: 'simple' });
+
+      expect(exported.length).toBeGreaterThan(0);
+      expect(exported).toContain('平均分');
     });
   });
 
@@ -839,6 +913,101 @@ describe('HomeworkGradingSDK', () => {
     it('should return correct remaining attempts', () => {
       const remaining = sdk.getRemainingAttempts('task001', 'stu001', 'q1');
       expect(remaining).toBe(3);
+    });
+  });
+
+  describe('Batch Feedback', () => {
+    beforeEach(() => {
+      sdk.createTask({
+        taskId: 'batch-task',
+        title: '批量反馈测试作业',
+        classId: 'class-batch',
+        questions: [singleChoiceRule, calculationRule],
+        retryPolicy,
+      });
+
+      const students = ['batch-stu1', 'batch-stu2', 'batch-stu3'];
+      for (const sid of students) {
+        sdk.submitAnswer('batch-task', {
+          questionId: 'q1',
+          answer: 'B',
+          studentId: sid,
+          submissionTime: new Date(),
+          attemptNumber: 1,
+        });
+        sdk.gradeSubmission('batch-task', sid, 'q1');
+
+        sdk.submitAnswer('batch-task', {
+          questionId: 'q3',
+          answer: '设x为未知数，列方程：2x+10=94。2x=84，x=42。验证正确。',
+          studentId: sid,
+          submissionTime: new Date(),
+          attemptNumber: 1,
+        });
+        sdk.gradeSubmission('batch-task', sid, 'q3');
+      }
+    });
+
+    it('should generate batch feedback for multiple students', () => {
+      const result = sdk.generateBatchFeedback({
+        taskId: 'batch-task',
+        studentIds: ['batch-stu1', 'batch-stu2', 'batch-stu3'],
+      });
+
+      expect(result.totalStudents).toBe(3);
+      expect(result.totalQuestions).toBe(2);
+      expect(result.perStudent.length).toBe(3);
+      expect(result.perQuestion.length).toBe(2);
+    });
+
+    it('should include student feedback and teacher comments in batch', () => {
+      const result = sdk.generateBatchFeedback({
+        taskId: 'batch-task',
+        studentIds: ['batch-stu1'],
+      });
+
+      const student = result.perStudent[0];
+      expect(student.studentId).toBe('batch-stu1');
+      expect(Object.keys(student.studentFeedback).length).toBeGreaterThan(0);
+      expect(Object.keys(student.teacherComment).length).toBeGreaterThan(0);
+      expect(student.questionResults.length).toBe(2);
+    });
+
+    it('should generate per question statistics', () => {
+      const result = sdk.generateBatchFeedback({
+        taskId: 'batch-task',
+        studentIds: ['batch-stu1', 'batch-stu2', 'batch-stu3'],
+      });
+
+      for (const pq of result.perQuestion) {
+        expect(pq.answeredCount).toBe(3);
+        expect(pq.averageScore).toBeGreaterThanOrEqual(0);
+        expect(pq.passRate).toBeGreaterThanOrEqual(0);
+      }
+    });
+
+    it('should format batch feedback result', () => {
+      const result = sdk.generateBatchFeedback({
+        taskId: 'batch-task',
+        studentIds: ['batch-stu1', 'batch-stu2'],
+      });
+      const formatted = sdk.formatBatchFeedback(result);
+
+      expect(formatted).toContain('批量反馈报告');
+      expect(formatted).toContain('题目汇总');
+      expect(formatted).toContain('学生成绩');
+    });
+
+    it('should filter by specific question ids', () => {
+      const result = sdk.generateBatchFeedback({
+        taskId: 'batch-task',
+        studentIds: ['batch-stu1'],
+        questionIds: ['q1'],
+      });
+
+      expect(result.totalQuestions).toBe(1);
+      expect(result.perStudent[0].questionResults.length).toBe(1);
+      expect(result.perStudent[0].questionResults[0].questionId).toBe('q1');
     });
   });
 

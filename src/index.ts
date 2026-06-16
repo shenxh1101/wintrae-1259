@@ -12,6 +12,12 @@ import {
   QuestionRule,
   ValidationResult,
   RetryPolicy,
+  QuestionTag,
+  QuestionType,
+  FilteredSummaryView,
+  ExportOptions,
+  BatchFeedbackRequest,
+  BatchFeedbackResult,
 } from './types';
 
 import { QuestionRuleEngine } from './core/QuestionRuleEngine';
@@ -20,6 +26,7 @@ import { TaskManager } from './core/TaskManager';
 import { GradingEngine } from './grading/GradingEngine';
 import { StudentFeedbackGenerator } from './feedback/StudentFeedbackGenerator';
 import { TeacherCommentGenerator } from './feedback/TeacherCommentGenerator';
+import { BatchFeedbackGenerator } from './feedback/BatchFeedbackGenerator';
 import {
   ClassSummaryGenerator,
   ClassSummaryContext,
@@ -38,6 +45,7 @@ export class HomeworkGradingSDK {
   private gradingEngine: GradingEngine;
   private studentFeedbackGenerator: StudentFeedbackGenerator;
   private teacherCommentGenerator: TeacherCommentGenerator;
+  private batchFeedbackGenerator: BatchFeedbackGenerator;
   private classSummaryGenerator: ClassSummaryGenerator;
   private options: HomeworkGradingSDKOptions;
 
@@ -49,6 +57,7 @@ export class HomeworkGradingSDK {
     this.gradingEngine = new GradingEngine(this.ruleEngine);
     this.studentFeedbackGenerator = new StudentFeedbackGenerator();
     this.teacherCommentGenerator = new TeacherCommentGenerator();
+    this.batchFeedbackGenerator = new BatchFeedbackGenerator();
     this.classSummaryGenerator = new ClassSummaryGenerator();
   }
 
@@ -219,6 +228,18 @@ export class HomeworkGradingSDK {
     return comment;
   }
 
+  generateBatchFeedback(request: BatchFeedbackRequest): BatchFeedbackResult {
+    const task = this.taskManager.getTask(request.taskId);
+    if (!task) {
+      throw new Error(`任务 ${request.taskId} 不存在`);
+    }
+    return this.batchFeedbackGenerator.generate(request, task);
+  }
+
+  formatBatchFeedback(result: BatchFeedbackResult): string {
+    return this.batchFeedbackGenerator.formatBatchResult(result);
+  }
+
   getStudentFeedback(
     taskId: string,
     studentId: string,
@@ -270,8 +291,75 @@ export class HomeworkGradingSDK {
     return this.classSummaryGenerator.generate(context);
   }
 
+  generateFilteredSummaryByTag(
+    taskId: string,
+    classId: string,
+    totalStudents: number,
+    tag: QuestionTag,
+  ): FilteredSummaryView {
+    const task = this.taskManager.getTask(taskId);
+    if (!task) {
+      throw new Error(`任务 ${taskId} 不存在`);
+    }
+
+    const allResults: GradingResult[] = [];
+    for (const studentResults of task.gradingResults.values()) {
+      allResults.push(...studentResults.values());
+    }
+
+    const context: ClassSummaryContext = {
+      taskId,
+      taskTitle: task.title,
+      classId,
+      totalStudents,
+      results: allResults,
+      questionRules: task.questions,
+    };
+
+    return this.classSummaryGenerator.generateFilteredViewByTag(context, tag);
+  }
+
+  generateFilteredSummaryByQuestionType(
+    taskId: string,
+    classId: string,
+    totalStudents: number,
+    questionType: QuestionType,
+  ): FilteredSummaryView {
+    const task = this.taskManager.getTask(taskId);
+    if (!task) {
+      throw new Error(`任务 ${taskId} 不存在`);
+    }
+
+    const allResults: GradingResult[] = [];
+    for (const studentResults of task.gradingResults.values()) {
+      allResults.push(...studentResults.values());
+    }
+
+    const context: ClassSummaryContext = {
+      taskId,
+      taskTitle: task.title,
+      classId,
+      totalStudents,
+      results: allResults,
+      questionRules: task.questions,
+    };
+
+    return this.classSummaryGenerator.generateFilteredViewByQuestionType(context, questionType);
+  }
+
   formatClassSummary(summary: ClassSummaryMetrics): string {
     return this.classSummaryGenerator.formatSummary(summary);
+  }
+
+  formatFilteredSummary(view: FilteredSummaryView): string {
+    return this.classSummaryGenerator.formatFilteredView(view);
+  }
+
+  exportClassSummary(
+    summary: ClassSummaryMetrics,
+    options?: ExportOptions,
+  ): string {
+    return this.classSummaryGenerator.exportForSharing(summary, options);
   }
 
   validateAnswer(
