@@ -19,6 +19,10 @@ import {
   BatchFeedbackRequest,
   BatchFeedbackResult,
   BatchExportOptions,
+  StudentFilterMode,
+  StudentFilteredDetail,
+  StudentGrowthRecord,
+  LessonPlan,
 } from './types';
 
 import { QuestionRuleEngine } from './core/QuestionRuleEngine';
@@ -365,6 +369,80 @@ export class HomeworkGradingSDK {
     options?: ExportOptions,
   ): string {
     return this.classSummaryGenerator.exportForSharing(summary, options);
+  }
+
+  filterStudentDetails(
+    taskId: string,
+    tag: QuestionTag,
+    classId: string,
+    totalStudents: number,
+    mode: StudentFilterMode,
+    maxCount?: number,
+  ): StudentFilteredDetail[] {
+    const view = this.generateFilteredSummaryByTag(taskId, classId, totalStudents, tag);
+    return this.classSummaryGenerator.filterStudentDetails(view.studentDetails, mode, maxCount);
+  }
+
+  filterStudentDetailsByQuestionType(
+    taskId: string,
+    questionType: QuestionType,
+    classId: string,
+    totalStudents: number,
+    mode: StudentFilterMode,
+    maxCount?: number,
+  ): StudentFilteredDetail[] {
+    const view = this.generateFilteredSummaryByQuestionType(taskId, classId, totalStudents, questionType);
+    return this.classSummaryGenerator.filterStudentDetails(view.studentDetails, mode, maxCount);
+  }
+
+  formatStudentDetailList(
+    details: StudentFilteredDetail[],
+    mode: StudentFilterMode,
+  ): string {
+    return this.classSummaryGenerator.formatStudentDetailList(details, mode);
+  }
+
+  generateStudentGrowth(
+    studentId: string,
+    taskIds: string[],
+  ): StudentGrowthRecord {
+    const taskResults: { taskId: string; taskTitle?: string; results: GradingResult[]; questionRules: QuestionRule[] }[] = [];
+
+    for (const taskId of taskIds) {
+      const task = this.taskManager.getTask(taskId);
+      if (!task) continue;
+
+      const results: GradingResult[] = [];
+      const studentResults = task.gradingResults.get(studentId);
+      if (studentResults) {
+        results.push(...studentResults.values());
+      }
+
+      taskResults.push({
+        taskId,
+        taskTitle: task.title,
+        results,
+        questionRules: task.questions,
+      });
+    }
+
+    return this.classSummaryGenerator.generateStudentGrowth({
+      studentId,
+      taskResults,
+    });
+  }
+
+  formatStudentGrowth(growth: StudentGrowthRecord): string {
+    return this.classSummaryGenerator.formatStudentGrowth(growth);
+  }
+
+  generateLessonPlan(taskId: string, classId: string, totalStudents: number): LessonPlan {
+    const summary = this.generateClassSummary(taskId, classId, totalStudents);
+    return this.classSummaryGenerator.generateLessonPlan(summary);
+  }
+
+  formatLessonPlan(plan: LessonPlan, taskName: string): string {
+    return this.classSummaryGenerator.formatLessonPlan(plan, taskName);
   }
 
   validateAnswer(

@@ -18,6 +18,16 @@ import {
   ExportFormat,
   StudentOverallScore,
   StudentFilteredDetail,
+  StudentFilterMode,
+  StudentGrowthRecord,
+  TaskGrowthResult,
+  TagGrowthTrend,
+  RepeatedError,
+  ImprovementStatus,
+  LessonPlan,
+  LessonSection,
+  TeachingSequenceItem,
+  ExcellentExample,
 } from '../types';
 import { ErrorClassifier } from '../grading/ErrorClassifier';
 
@@ -28,6 +38,11 @@ export interface ClassSummaryContext {
   totalStudents: number;
   results: GradingResult[];
   questionRules: QuestionRule[];
+}
+
+export interface MultiTaskGrowthContext {
+  studentId: string;
+  taskResults: { taskId: string; taskTitle?: string; results: GradingResult[]; questionRules: QuestionRule[] }[];
 }
 
 export class ClassSummaryGenerator {
@@ -890,6 +905,454 @@ export class ClassSummaryGenerator {
           const errors = sd.mainErrors.map(e => e.category).join('、');
           lines.push(`     主要错: ${errors}`);
         }
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  filterStudentDetails(
+    allDetails: StudentFilteredDetail[],
+    mode: StudentFilterMode,
+    maxCount?: number,
+  ): StudentFilteredDetail[] {
+    let filtered: StudentFilteredDetail[];
+    switch (mode) {
+      case 'attention':
+        filtered = allDetails.filter(d => !d.passed || d.percentage < 75);
+        break;
+      case 'excellent':
+        filtered = allDetails.filter(d => d.percentage >= 90);
+        break;
+      case 'all':
+      default:
+        filtered = [...allDetails];
+        break;
+    }
+    if (maxCount && maxCount > 0) {
+      filtered = filtered.slice(0, maxCount);
+    }
+    return filtered;
+  }
+
+  formatStudentDetailList(
+    details: StudentFilteredDetail[],
+    mode: StudentFilterMode,
+  ): string {
+    const lines: string[] = [];
+    const modeLabel = mode === 'attention' ? '待关注学生' : mode === 'excellent' ? '优秀学生' : '全部学生';
+
+    lines.push(`👤 ${modeLabel}名单（${details.length}人）:`);
+    lines.push('');
+
+    for (const sd of details) {
+      const flag = sd.percentage >= 90 ? '⭐' : sd.passed ? '✅' : '❌';
+      lines.push(`  ${flag} ${sd.studentId}: ${sd.totalEarned}/${sd.totalMax}分 (${sd.percentage.toFixed(1)}%)`);
+      if (sd.weakQuestions.length > 0) {
+        const weakList = sd.weakQuestions.map(q =>
+          `${q.questionId}(${q.earnedScore}/${q.totalScore})`
+        ).join('、');
+        lines.push(`     薄弱题: ${weakList}`);
+      }
+      if (sd.mainErrors.length > 0) {
+        const errList = sd.mainErrors.map(e => `${e.category}×${e.count}`).join('、');
+        lines.push(`     主要错: ${errList}`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  generateStudentGrowth(context: MultiTaskGrowthContext): StudentGrowthRecord {
+    const { studentId, taskResults } = context;
+
+    const growthResults: TaskGrowthResult[] = taskResults.map(tr => {
+      const totalEarned = tr.results.reduce((s, r) => s + r.earnedScore, 0);
+      const totalMax = tr.questionRules.reduce((s, q) => s + q.totalScore, 0);
+      const percentage = totalMax > 0 ? (totalEarned / totalMax) * 100 : 0;
+      return {
+        taskId: tr.taskId,
+        taskTitle: tr.taskTitle,
+        totalEarned,
+        totalMax,
+        percentage,
+        passed: percentage >= 60,
+      };
+    });
+
+    const tagTrends = this.buildTagTrends(taskResults);
+
+    const repeatedErrors = this.buildRepeatedErrors(taskResults);
+
+    const latestImprovement = this.buildImprovementStatus(growthResults);
+
+    return {
+      studentId,
+      taskResults: growthResults,
+      tagTrends,
+      repeatedErrors,
+      latestImprovement,
+    };
+  }
+
+  private buildTagTrends(
+    taskResults: { taskId: string; taskTitle?: string; results: GradingResult[]; questionRules: QuestionRule[] }[],
+  ): TagGrowthTrend[] {
+    const tagMap = new Map<string, { tag: string; tagName: string; scores: { taskId: string; taskTitle?: string; percentage: number }[] }>();
+
+    for (const tr of taskResults) {
+      const tagScores = new Map<string, { earned: number; max: number }>();
+
+      for (const rule of tr.questionRules) {
+        for (const tag of rule.tags) {
+          if (!tagScores.has(tag)) tagScores.set(tag, { earned: 0, max: 0 });
+          const data = tagScores.get(tag)!;
+          data.max += rule.totalScore;
+        }
+      }
+
+      for (const r of tr.results) {
+        const rule = tr.questionRules.find(q => q.questionId === r.questionId);
+        if (!rule) continue;
+        for (const tag of rule.tags) {
+          if (!tagScores.has(tag)) tagScores.set(tag, { earned: 0, max: 0 });
+          tagScores.get(tag)!.earned += r.earnedScore;
+        }
+      }
+
+      for (const [tag, data] of tagScores.entries()) {
+        if (!tagMap.has(tag)) {
+          tagMap.set(tag, {
+            tag,
+            tagName: this.tagNames[tag as QuestionTag] || tag,
+            scores: [],
+          });
+        }
+        const pct = data.max > 0 ? (data.earned / data.max) * 100 : 0;
+        tagMap.get(tag)!.scores.push({
+          taskId: tr.taskId,
+          taskTitle: tr.taskTitle,
+          percentage: pct,
+        });
+      }
+    }
+
+    const trends: TagGrowthTrend[] = [];
+    for (const data of tagMap.values()) {
+      let trend: TagGrowthTrend['trend'] = 'insufficient_data';
+      if (data.scores.length >= 2) {
+        const first = data.scores[0].percentage;
+        const last = data.scores[data.scores.length - 1].percentage;
+        const diff = last - first;
+        if (diff > 5) trend = 'improving';
+        else if (diff < -5) trend = 'declining';
+        else trend = 'stable';
+      }
+      trends.push({ tag: data.tag, tagName: data.tagName, scores: data.scores, trend });
+    }
+
+    return trends;
+  }
+
+  private buildRepeatedErrors(
+    taskResults: { taskId: string; results: GradingResult[] }[],
+  ): RepeatedError[] {
+    const errorMap = new Map<string, { category: string; categoryName: string; description: string; count: number; taskIds: Set<string>; latestTask: string }>();
+
+    for (const tr of taskResults) {
+      for (const r of tr.results) {
+        if (!r.errors) continue;
+        for (const e of r.errors) {
+          const key = `${e.category}_${e.description}`;
+          if (!errorMap.has(key)) {
+            errorMap.set(key, {
+              category: e.category,
+              categoryName: this.errorClassifier.getCategoryName(e.category),
+              description: e.description,
+              count: 0,
+              taskIds: new Set(),
+              latestTask: tr.taskId,
+            });
+          }
+          const data = errorMap.get(key)!;
+          data.count++;
+          data.taskIds.add(tr.taskId);
+          data.latestTask = tr.taskId;
+        }
+      }
+    }
+
+    const repeated: RepeatedError[] = [];
+    for (const data of errorMap.values()) {
+      if (data.taskIds.size >= 2) {
+        repeated.push({
+          category: data.category,
+          categoryName: data.categoryName,
+          description: data.description,
+          occurrenceCount: data.count,
+          taskIds: Array.from(data.taskIds),
+          latestOccurrence: data.latestTask,
+        });
+      }
+    }
+
+    return repeated.sort((a, b) => b.occurrenceCount - a.occurrenceCount);
+  }
+
+  private buildImprovementStatus(growthResults: TaskGrowthResult[]): ImprovementStatus {
+    if (growthResults.length === 0) {
+      return {
+        latestTaskId: '',
+        latestPercentage: 0,
+        previousPercentage: 0,
+        change: 0,
+        changeLabel: 'stable',
+        summary: '暂无作业数据',
+      };
+    }
+
+    const latest = growthResults[growthResults.length - 1];
+    const previous = growthResults.length >= 2
+      ? growthResults[growthResults.length - 2]
+      : latest;
+
+    const change = latest.percentage - previous.percentage;
+    let changeLabel: ImprovementStatus['changeLabel'];
+    if (change > 5) changeLabel = 'improved';
+    else if (change < -5) changeLabel = 'declined';
+    else changeLabel = 'stable';
+
+    let summary = '';
+    switch (changeLabel) {
+      case 'improved':
+        summary = `较上次提升${change.toFixed(1)}个百分点，进步明显，继续保持！`;
+        break;
+      case 'declined':
+        summary = `较上次下降${Math.abs(change).toFixed(1)}个百分点，需要关注并加强薄弱环节。`;
+        break;
+      case 'stable':
+        summary = `与上次相比基本持平（${change >= 0 ? '+' : ''}${change.toFixed(1)}），建议针对薄弱项加强练习。`;
+        break;
+    }
+
+    return {
+      latestTaskId: latest.taskId,
+      latestTaskTitle: latest.taskTitle,
+      latestPercentage: latest.percentage,
+      previousPercentage: previous.percentage,
+      change,
+      changeLabel,
+      summary,
+    };
+  }
+
+  formatStudentGrowth(growth: StudentGrowthRecord): string {
+    const lines: string[] = [];
+
+    lines.push(`========================================`);
+    lines.push(`  📈 学生成长追踪 - ${growth.studentId}`);
+    lines.push(`========================================`);
+    lines.push('');
+
+    lines.push(`【历次作业得分】`);
+    for (const tr of growth.taskResults) {
+      const flag = tr.percentage >= 90 ? '⭐' : tr.passed ? '✅' : '❌';
+      const title = tr.taskTitle || tr.taskId;
+      lines.push(`  ${flag} ${title}: ${tr.totalEarned}/${tr.totalMax}分 (${tr.percentage.toFixed(1)}%)`);
+    }
+    lines.push('');
+
+    if (growth.tagTrends.length > 0) {
+      lines.push(`【各专项得分趋势】`);
+      for (const tt of growth.tagTrends) {
+        const icon = tt.trend === 'improving' ? '📈' : tt.trend === 'declining' ? '📉' : tt.trend === 'stable' ? '➡️' : '❓';
+        lines.push(`  ${icon} ${tt.tagName}:`);
+        for (const sc of tt.scores) {
+          const title = sc.taskTitle || sc.taskId;
+          lines.push(`     ${title}: ${sc.percentage.toFixed(1)}%`);
+        }
+        const trendLabel = tt.trend === 'improving' ? '进步中' : tt.trend === 'declining' ? '需关注' : tt.trend === 'stable' ? '稳定' : '数据不足';
+        lines.push(`     趋势: ${trendLabel}`);
+      }
+      lines.push('');
+    }
+
+    if (growth.repeatedErrors.length > 0) {
+      lines.push(`【反复出错】`);
+      for (const re of growth.repeatedErrors) {
+        lines.push(`  ⚠️ [${re.categoryName}] ${re.description}`);
+        lines.push(`     出现${re.occurrenceCount}次，涉及${re.taskIds.length}次作业`);
+      }
+      lines.push('');
+    }
+
+    lines.push(`【最近一次改善情况】`);
+    const imp = growth.latestImprovement;
+    const impIcon = imp.changeLabel === 'improved' ? '📈' : imp.changeLabel === 'declined' ? '📉' : '➡️';
+    lines.push(`  ${impIcon} ${imp.summary}`);
+
+    return lines.join('\n');
+  }
+
+  generateLessonPlan(summary: ClassSummaryMetrics): LessonPlan {
+    const preClassReview: LessonSection = {
+      title: '课前回顾',
+      items: [],
+      duration: '5-10分钟',
+    };
+
+    const classFocus: LessonSection = {
+      title: '课堂重点',
+      items: [],
+      duration: '25-35分钟',
+    };
+
+    const postClassPractice: LessonSection = {
+      title: '课后练习',
+      items: [],
+      duration: '10-15分钟',
+    };
+
+    const sortedQuestions = [...summary.questionPerformance].sort((a, b) => a.passRate - b.passRate);
+    const lowScoreQuestions = sortedQuestions.filter(q => q.passRate < 0.6);
+    const midScoreQuestions = sortedQuestions.filter(q => q.passRate >= 0.6 && q.passRate < 0.8);
+    const highScoreQuestions = sortedQuestions.filter(q => q.passRate >= 0.8);
+
+    if (summary.overallAssessment.concerns.length > 0) {
+      preClassReview.items.push(`针对上次作业暴露的问题，回顾：${summary.overallAssessment.concerns.slice(0, 2).join('、')}`);
+    }
+    if (lowScoreQuestions.length > 0) {
+      preClassReview.items.push(`重点回顾以下题目的基础知识：${lowScoreQuestions.map(q => q.questionId).join('、')}`);
+    }
+    if (summary.overallAssessment.highlights.length > 0) {
+      preClassReview.items.push(`肯定上次作业亮点：${summary.overallAssessment.highlights[0]}`);
+    }
+
+    for (const q of lowScoreQuestions) {
+      classFocus.items.push(`🔥 重点讲解题目${q.questionId}（正确率${(q.passRate * 100).toFixed(0)}%），拆解核心知识点，配合例题巩固`);
+    }
+    if (summary.commonErrors.length > 0) {
+      for (let i = 0; i < Math.min(2, summary.commonErrors.length); i++) {
+        const e = summary.commonErrors[i];
+        classFocus.items.push(`📌 针对共性问题[${e.categoryName}]进行专项讲解，${e.suggestion || '结合练习题加深理解'}`);
+      }
+    }
+    for (const q of midScoreQuestions) {
+      classFocus.items.push(`💡 题目${q.questionId}正确率${(q.passRate * 100).toFixed(0)}%，快速过一遍易错点即可`);
+    }
+
+    const lowTags = summary.tagPerformance.filter(t => t.passRate < 0.6);
+    if (lowTags.length > 0) {
+      postClassPractice.items.push(`布置${lowTags.map(t => t.tagName).join('、')}专项练习，巩固薄弱环节`);
+    }
+    if (lowScoreQuestions.length > 0) {
+      postClassPractice.items.push(`针对低分题(${lowScoreQuestions.map(q => q.questionId).join('、')})设计变式题，检查是否真正掌握`);
+    }
+    if (summary.overallAssessment.actionItems.length > 0) {
+      postClassPractice.items.push(summary.overallAssessment.actionItems[0]);
+    }
+
+    const teachingSequence: TeachingSequenceItem[] = [];
+    let order = 1;
+
+    for (const q of lowScoreQuestions) {
+      teachingSequence.push({
+        order: order++,
+        type: 'low_score_question',
+        title: `低分题讲解：题目${q.questionId}`,
+        questionId: q.questionId,
+        detail: `正确率仅${(q.passRate * 100).toFixed(0)}%，需重点讲解核心知识点和解题思路`,
+        duration: '8-10分钟',
+      });
+    }
+
+    if (summary.commonErrors.length > 0) {
+      const topError = summary.commonErrors[0];
+      teachingSequence.push({
+        order: order++,
+        type: 'common_error',
+        title: `共性错误：${topError.categoryName}`,
+        detail: `${topError.description}，影响${topError.affectedStudents}人，建议：${topError.suggestion || '针对性讲解'}`,
+        duration: '5-8分钟',
+      });
+    }
+
+    const excellentStudents = summary.studentScores.filter(s => s.percentage >= 90);
+    if (excellentStudents.length > 0 && highScoreQuestions.length > 0) {
+      const bestQ = highScoreQuestions[0];
+      teachingSequence.push({
+        order: order++,
+        type: 'excellent_example',
+        title: `优秀样例展示：题目${bestQ.questionId}`,
+        questionId: bestQ.questionId,
+        detail: `该题正确率${(bestQ.passRate * 100).toFixed(0)}%，展示优秀学生${excellentStudents[0].studentId}的解法，供全班学习`,
+        duration: '3-5分钟',
+      });
+    }
+
+    const excellentExamples: ExcellentExample[] = [];
+    for (const q of highScoreQuestions.slice(0, 2)) {
+      const topStudent = summary.studentScores.find(s => s.percentage >= 90);
+      if (topStudent) {
+        excellentExamples.push({
+          questionId: q.questionId,
+          studentId: topStudent.studentId,
+          score: (q.passRate / 100) * (summary.questionPerformance.find(p => p.questionId === q.questionId)?.difficulty || 10) * 10,
+          totalScore: q.difficulty * 10 || 10,
+          comment: `解题思路清晰，知识点掌握扎实，可作为标准答案展示`,
+        });
+      }
+    }
+
+    return {
+      preClassReview,
+      classFocus,
+      postClassPractice,
+      teachingSequence,
+      excellentExamples,
+    };
+  }
+
+  formatLessonPlan(plan: LessonPlan, taskName: string): string {
+    const lines: string[] = [];
+
+    lines.push(`========================================`);
+    lines.push(`  📝 教案 - ${taskName}`);
+    lines.push(`========================================`);
+    lines.push('');
+
+    lines.push(`【一、${plan.preClassReview.title}】（约${plan.preClassReview.duration}）`);
+    for (const item of plan.preClassReview.items) {
+      lines.push(`  • ${item}`);
+    }
+    lines.push('');
+
+    lines.push(`【二、${plan.classFocus.title}】（约${plan.classFocus.duration}）`);
+    for (const item of plan.classFocus.items) {
+      lines.push(`  • ${item}`);
+    }
+    lines.push('');
+
+    lines.push(`【三、${plan.postClassPractice.title}】（约${plan.postClassPractice.duration}）`);
+    for (const item of plan.postClassPractice.items) {
+      lines.push(`  • ${item}`);
+    }
+    lines.push('');
+
+    lines.push(`【讲解顺序】`);
+    for (const ts of plan.teachingSequence) {
+      const icon = ts.type === 'low_score_question' ? '🔥' : ts.type === 'common_error' ? '📌' : '🌟';
+      lines.push(`  ${ts.order}. ${icon} ${ts.title}`);
+      lines.push(`     ${ts.detail}`);
+      if (ts.duration) lines.push(`     建议时长：${ts.duration}`);
+    }
+    lines.push('');
+
+    if (plan.excellentExamples.length > 0) {
+      lines.push(`【优秀样例】`);
+      for (const ex of plan.excellentExamples) {
+        lines.push(`  ⭐ 题目${ex.questionId} - 学生${ex.studentId}`);
+        lines.push(`     ${ex.comment}`);
       }
     }
 

@@ -1172,6 +1172,250 @@ describe('HomeworkGradingSDK', () => {
     });
   });
 
+  describe('Student Detail Filtering & Growth', () => {
+    beforeEach(() => {
+      sdk.createTask({
+        taskId: 'growth-task1',
+        title: '第一次作业',
+        classId: 'class-growth',
+        questions: [singleChoiceRule, calculationRule],
+        retryPolicy,
+      });
+
+      sdk.createTask({
+        taskId: 'growth-task2',
+        title: '第二次作业',
+        classId: 'class-growth',
+        questions: [singleChoiceRule, calculationRule],
+        retryPolicy,
+      });
+
+      const firstAnswers: Record<string, Record<string, unknown>> = {
+        'g-stu1': { q1: 'B', q3: 'x=40' },
+        'g-stu2': { q1: 'A', q3: 'x=30' },
+        'g-stu3': { q1: 'B', q3: '设未知数，2x+10=94，x=42。验证正确。' },
+      };
+
+      for (const [sid, ans] of Object.entries(firstAnswers)) {
+        sdk.submitAnswer('growth-task1', {
+          questionId: 'q1', answer: ans.q1 as never, studentId: sid,
+          submissionTime: new Date(), attemptNumber: 1,
+        });
+        sdk.submitAnswer('growth-task1', {
+          questionId: 'q3', answer: ans.q3 as never, studentId: sid,
+          submissionTime: new Date(), attemptNumber: 1,
+        });
+        sdk.gradeSubmission('growth-task1', sid, 'q1');
+        sdk.gradeSubmission('growth-task1', sid, 'q3');
+      }
+
+      const secondAnswers: Record<string, Record<string, unknown>> = {
+        'g-stu1': { q1: 'B', q3: '设x为未知数，2x+10=94，x=42。验证正确。' },
+        'g-stu2': { q1: 'B', q3: '2x+10=94，x=42。' },
+        'g-stu3': { q1: 'B', q3: '设未知数，列方程2x+10=94，解方程得x=42。' },
+      };
+
+      for (const [sid, ans] of Object.entries(secondAnswers)) {
+        sdk.submitAnswer('growth-task2', {
+          questionId: 'q1', answer: ans.q1 as never, studentId: sid,
+          submissionTime: new Date(), attemptNumber: 1,
+        });
+        sdk.submitAnswer('growth-task2', {
+          questionId: 'q3', answer: ans.q3 as never, studentId: sid,
+          submissionTime: new Date(), attemptNumber: 1,
+        });
+        sdk.gradeSubmission('growth-task2', sid, 'q1');
+        sdk.gradeSubmission('growth-task2', sid, 'q3');
+      }
+    });
+
+    it('should filter students by attention mode', () => {
+      const details = sdk.filterStudentDetails('growth-task1', 'foundation', 'class-growth', 3, 'attention');
+      for (const d of details) {
+        expect(!d.passed || d.percentage < 75).toBe(true);
+      }
+    });
+
+    it('should filter students by excellent mode', () => {
+      const details = sdk.filterStudentDetails('growth-task1', 'foundation', 'class-growth', 3, 'excellent');
+      for (const d of details) {
+        expect(d.percentage).toBeGreaterThanOrEqual(90);
+      }
+    });
+
+    it('should filter students by all mode', () => {
+      const details = sdk.filterStudentDetails('growth-task1', 'foundation', 'class-growth', 3, 'all');
+      expect(details.length).toBeGreaterThan(0);
+    });
+
+    it('should respect maxCount in filter', () => {
+      const details = sdk.filterStudentDetails('growth-task1', 'foundation', 'class-growth', 3, 'all', 2);
+      expect(details.length).toBeLessThanOrEqual(2);
+    });
+
+    it('should format student detail list', () => {
+      const details = sdk.filterStudentDetails('growth-task1', 'foundation', 'class-growth', 3, 'all');
+      const formatted = sdk.formatStudentDetailList(details, 'all');
+      expect(formatted).toContain('全部学生');
+    });
+
+    it('should generate student growth across tasks', () => {
+      const growth = sdk.generateStudentGrowth('g-stu1', ['growth-task1', 'growth-task2']);
+
+      expect(growth.studentId).toBe('g-stu1');
+      expect(growth.taskResults.length).toBe(2);
+      expect(growth.tagTrends.length).toBeGreaterThan(0);
+      expect(growth.latestImprovement).toBeDefined();
+    });
+
+    it('should show improvement status', () => {
+      const growth = sdk.generateStudentGrowth('g-stu1', ['growth-task1', 'growth-task2']);
+
+      expect(growth.latestImprovement.changeLabel).toBeDefined();
+      expect(['improved', 'stable', 'declined']).toContain(growth.latestImprovement.changeLabel);
+      expect(growth.latestImprovement.summary.length).toBeGreaterThan(0);
+    });
+
+    it('should detect tag trends', () => {
+      const growth = sdk.generateStudentGrowth('g-stu1', ['growth-task1', 'growth-task2']);
+
+      expect(growth.tagTrends.length).toBeGreaterThan(0);
+      for (const tt of growth.tagTrends) {
+        expect(['improving', 'stable', 'declining', 'insufficient_data']).toContain(tt.trend);
+      }
+    });
+
+    it('should format student growth', () => {
+      const growth = sdk.generateStudentGrowth('g-stu1', ['growth-task1', 'growth-task2']);
+      const formatted = sdk.formatStudentGrowth(growth);
+
+      expect(formatted).toContain('学生成长追踪');
+      expect(formatted).toContain('g-stu1');
+      expect(formatted).toContain('历次作业得分');
+    });
+  });
+
+  describe('Lesson Plan & Templates', () => {
+    beforeEach(() => {
+      sdk.createTask({
+        taskId: 'plan-task',
+        title: '教案测试作业',
+        classId: 'class-plan',
+        questions: [singleChoiceRule, calculationRule],
+        retryPolicy,
+      });
+
+      const answers: Record<string, Record<string, unknown>> = {
+        'p-stu1': { q1: 'B', q3: '设x为未知数，2x+10=94，x=42。验证正确。' },
+        'p-stu2': { q1: 'A', q3: 'x=40' },
+        'p-stu3': { q1: 'B', q3: '2x=84，x=42。' },
+      };
+
+      for (const [sid, ans] of Object.entries(answers)) {
+        sdk.submitAnswer('plan-task', {
+          questionId: 'q1', answer: ans.q1 as never, studentId: sid,
+          submissionTime: new Date(), attemptNumber: 1,
+        });
+        sdk.submitAnswer('plan-task', {
+          questionId: 'q3', answer: ans.q3 as never, studentId: sid,
+          submissionTime: new Date(), attemptNumber: 1,
+        });
+        sdk.gradeSubmission('plan-task', sid, 'q1');
+        sdk.gradeSubmission('plan-task', sid, 'q3');
+      }
+    });
+
+    it('should generate lesson plan with three sections', () => {
+      const plan = sdk.generateLessonPlan('plan-task', 'class-plan', 5);
+
+      expect(plan.preClassReview.title).toBe('课前回顾');
+      expect(plan.classFocus.title).toBe('课堂重点');
+      expect(plan.postClassPractice.title).toBe('课后练习');
+    });
+
+    it('should have teaching sequence items', () => {
+      const plan = sdk.generateLessonPlan('plan-task', 'class-plan', 5);
+
+      expect(plan.teachingSequence.length).toBeGreaterThan(0);
+      for (const ts of plan.teachingSequence) {
+        expect(['low_score_question', 'common_error', 'excellent_example']).toContain(ts.type);
+        expect(ts.order).toBeGreaterThan(0);
+        expect(ts.detail.length).toBeGreaterThan(0);
+      }
+    });
+
+    it('should format lesson plan', () => {
+      const plan = sdk.generateLessonPlan('plan-task', 'class-plan', 5);
+      const formatted = sdk.formatLessonPlan(plan, '教案测试作业');
+
+      expect(formatted).toContain('教案');
+      expect(formatted).toContain('课前回顾');
+      expect(formatted).toContain('课堂重点');
+      expect(formatted).toContain('课后练习');
+      expect(formatted).toContain('讲解顺序');
+    });
+
+    it('should export batch feedback with parent communication template', () => {
+      const batchResult = sdk.generateBatchFeedback({
+        taskId: 'plan-task',
+        studentIds: ['p-stu1', 'p-stu2'],
+      });
+      const exported = sdk.exportBatchFeedback(batchResult, {
+        view: 'by_student',
+        studentId: 'p-stu1',
+        template: 'parent_communication',
+      });
+
+      expect(exported).toContain('家长沟通版');
+      expect(exported).toContain('家长您好');
+    });
+
+    it('should export batch feedback with student self-eval template', () => {
+      const batchResult = sdk.generateBatchFeedback({
+        taskId: 'plan-task',
+        studentIds: ['p-stu1'],
+      });
+      const exported = sdk.exportBatchFeedback(batchResult, {
+        view: 'by_student',
+        studentId: 'p-stu1',
+        template: 'student_self_eval',
+      });
+
+      expect(exported).toContain('学生自评版');
+      expect(exported).toContain('自评问题');
+    });
+
+    it('should export question with parent communication template', () => {
+      const batchResult = sdk.generateBatchFeedback({
+        taskId: 'plan-task',
+        studentIds: ['p-stu1', 'p-stu2', 'p-stu3'],
+        questionIds: ['q1'],
+      });
+      const exported = sdk.exportBatchFeedback(batchResult, {
+        view: 'by_question',
+        questionId: 'q1',
+        template: 'parent_communication',
+      });
+
+      expect(exported).toContain('家长沟通话术');
+    });
+
+    it('should export question with student self-eval template', () => {
+      const batchResult = sdk.generateBatchFeedback({
+        taskId: 'plan-task',
+        studentIds: ['p-stu1', 'p-stu2', 'p-stu3'],
+        questionIds: ['q1'],
+      });
+      const exported = sdk.exportBatchFeedback(batchResult, {
+        view: 'by_question',
+        questionId: 'q1',
+        template: 'student_self_eval',
+      });
+
+      expect(exported).toContain('学生自评引导');
+    });
+  });
+
   describe('Integration Test - Full Workflow', () => {
     it('should complete full workflow from task creation to feedback', () => {
       const task = sdk.createTask({

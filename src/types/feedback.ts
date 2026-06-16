@@ -114,6 +114,13 @@ export interface ClassSummaryMetrics {
   generatedAt: Date;
 }
 
+export type StudentFilterMode = 'all' | 'attention' | 'excellent';
+
+export interface FilteredStudentListOptions {
+  filter: StudentFilterMode;
+  maxCount?: number;
+}
+
 export interface StudentFilteredDetail {
   studentId: string;
   totalEarned: number;
@@ -194,12 +201,90 @@ export type ExportFormat = 'class_notice' | 'teaching_group' | 'simple' | 'lesso
 
 export type BatchExportView = 'by_question' | 'by_student';
 
+export type BatchExportTemplate = 'default' | 'parent_communication' | 'student_self_eval';
+
 export interface BatchExportOptions {
   view: BatchExportView;
   questionId?: string;
   studentId?: string;
   includeStudentFeedback?: boolean;
   includeTeacherComment?: boolean;
+  template?: BatchExportTemplate;
+}
+
+export interface StudentGrowthRecord {
+  studentId: string;
+  taskResults: TaskGrowthResult[];
+  tagTrends: TagGrowthTrend[];
+  repeatedErrors: RepeatedError[];
+  latestImprovement: ImprovementStatus;
+}
+
+export interface TaskGrowthResult {
+  taskId: string;
+  taskTitle?: string;
+  totalEarned: number;
+  totalMax: number;
+  percentage: number;
+  passed: boolean;
+  gradedAt?: Date;
+}
+
+export interface TagGrowthTrend {
+  tag: string;
+  tagName: string;
+  scores: { taskId: string; taskTitle?: string; percentage: number }[];
+  trend: 'improving' | 'stable' | 'declining' | 'insufficient_data';
+}
+
+export interface RepeatedError {
+  category: string;
+  categoryName: string;
+  description: string;
+  occurrenceCount: number;
+  taskIds: string[];
+  latestOccurrence: string;
+}
+
+export interface ImprovementStatus {
+  latestTaskId: string;
+  latestTaskTitle?: string;
+  latestPercentage: number;
+  previousPercentage: number;
+  change: number;
+  changeLabel: 'improved' | 'stable' | 'declined';
+  summary: string;
+}
+
+export interface LessonPlan {
+  preClassReview: LessonSection;
+  classFocus: LessonSection;
+  postClassPractice: LessonSection;
+  teachingSequence: TeachingSequenceItem[];
+  excellentExamples: ExcellentExample[];
+}
+
+export interface LessonSection {
+  title: string;
+  items: string[];
+  duration?: string;
+}
+
+export interface TeachingSequenceItem {
+  order: number;
+  type: 'low_score_question' | 'common_error' | 'excellent_example';
+  title: string;
+  questionId?: string;
+  detail: string;
+  duration?: string;
+}
+
+export interface ExcellentExample {
+  questionId: string;
+  studentId: string;
+  score: number;
+  totalScore: number;
+  comment: string;
 }
 
 export interface LessonReviewData {
